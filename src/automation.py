@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ideator_new as ideator
 import researcher
 import core
-import veracity_check
+from veracity_check import verificar_veracidade_roteiro
 
 
 async def executar_pipeline_factual(nicho_escolhido=None):
@@ -18,7 +18,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
     max_tentativas = 5
     tentativa = 0
     fatos_validados = None
-    tema_escolhido = ""
+    tema_titulo_final = ""
 
     print("🚀 Iniciando Pipeline Factual...")
 
@@ -41,39 +41,43 @@ async def executar_pipeline_factual(nicho_escolhido=None):
             continue
 
         if isinstance(tema_obj, dict):
-            tema_escolhido = tema_obj.get("title")
+            # O 'title' é o título clickbait para o vídeo final.
+            # A 'entity' ou o primeiro keyword é o termo limpo para pesquisa.
+            tema_titulo_final = tema_obj.get("title")
+            tema_pesquisa = tema_obj.get("entity", tema_titulo_final) # Usa 'entity' se existir, senão fallback para o título
             tema_keywords = tema_obj.get("keywords", [])
         else:
-            tema_escolhido = str(tema_obj)
+            tema_titulo_final = str(tema_obj)
+            tema_pesquisa = str(tema_obj)
             tema_keywords = []
 
         # 2. Pesquisa
         texto_bruto = researcher.pesquisar_dados_brutos(
-            tema_escolhido, keywords=tema_keywords
+            tema_pesquisa, keywords=tema_keywords
         )
 
         # VALIDAÇÃO DE TEMA: Se a pesquisa retornou 0 fragmentos relevantes,
         # o tema é lixo. Descarte imediatamente.
         if len(texto_bruto) < 3:
-            print(f"⚠️ Tema '{tema_escolhido}' é uma alucinação. Descartando...")
+            print(f"⚠️ Tema '{tema_pesquisa}' não retornou resultados de pesquisa suficientes. Descartando...")
             continue
 
         # 3. Resumo e Validação
         # Preferir extração local (mais rápida) e só cair no LLM se necessário
         fatos_json = researcher.gerar_resumo_factual(
-            texto_bruto, tema_escolhido, use_llm=False
+            texto_bruto, tema_pesquisa, use_llm=False
         )
         if not fatos_json:
             print("ℹ️ Extração local insuficiente. Tentando LLM para resumo factual...")
             fatos_json = researcher.gerar_resumo_factual(
-                texto_bruto, tema_escolhido, use_llm=True
+                texto_bruto, tema_pesquisa, use_llm=True
             )
 
         if researcher.validar_densidade(fatos_json):
             fatos_validados = fatos_json
             break
         else:
-            print(f"⚠️ Tema '{tema_escolhido}' descartado por falta de dados reais.")
+            print(f"⚠️ Tema '{tema_pesquisa}' descartado por falta de dados reais.")
 
     if not fatos_validados:
         print(
@@ -84,24 +88,24 @@ async def executar_pipeline_factual(nicho_escolhido=None):
     # 4. Geração de Roteiro Grounded (Passando o nicho para o Agente Especialista)
     roteiro, termo_busca = core.gerar_roteiro_factual(fatos_validados, nicho=nicho_escolhido)
 
-    if not roteiro:
-        print("❌ Falha ao gerar roteiro factual.")
+    if not roteiro or len(roteiro) < 50:
+        print("❌ Falha ao gerar roteiro factual ou roteiro muito curto.")
         return
 
-    # --- AUDITORIA DE VERACIDADE ---
-    aprovado, auditoria = veracity_check.verificar_veracidade_roteiro(roteiro, fatos_validados)
+    # 4.5 AUDITORIA DE VERACIDADE (PASSO CRÍTICO ANTI-ALUCINAÇÃO)
+    aprovado, auditoria = verificar_veracidade_roteiro(roteiro, fatos_validados)
     if not aprovado:
-        print(f"⚠️ Roteiro REPROVADO na auditoria de veracidade!")
-        print(f"   Alucinações: {auditoria.get('alucinacoes')}")
-        print(f"   Score: {auditoria.get('score_fidelidade')}")
+        print("\n" + "="*50)
+        print("🚨 AUDITORIA AUTOMÁTICA REPROVOU O ROTEIRO POR ALUCINAÇÃO!")
         print(f"   Justificativa: {auditoria.get('justificativa')}")
-        confirmacao_auditoria = input("Deseja prosseguir mesmo assim (S/N)? ")
-        if confirmacao_auditoria.lower() != "s":
-            print("Abortando devido a falha na veracidade.")
-            return
-    else:
-        print(f"✅ Roteiro APROVADO na auditoria de veracidade (Score: {auditoria.get('score_fidelidade')}).")
+        print(f"   Alucinações Detectadas: {auditoria.get('alucinacoes', 'N/A')}")
+        print("="*50 + "\n")
+        # Neste ponto, poderíamos tentar gerar o roteiro novamente com um prompt mais rígido
+        # ou simplesmente descartar o tema e encerrar. Por segurança, vamos encerrar.
+        print("❌ Execução cancelada devido à falha de veracidade. O tema pode ser ruim ou o LLM instável.")
+        return
 
+    print("✅ Auditoria de veracidade aprovou o roteiro.")
     print(f"--- ROTEIRO GERADO ---\n{roteiro}")
     print(f"\n[!] Por favor, revise o roteiro acima.")
     confirmacao = input("O roteiro está factual e limpo (S/N)? ")
@@ -134,7 +138,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
 
     # Gerar arquivo de metadados para facilitar o upload manual
     with open(novo_nome.replace(".mp4", ".txt"), "w", encoding="utf-8") as f:
-        f.write(f"TEMA: {tema_escolhido}\n")
+        f.write(f"TEMA: {tema_titulo_final}\n")
         f.write(f"ROTEIRO: {roteiro}\n")
         f.write(f"HASHTAGS: #curiosidades #fatos #{handle}\n")
 
@@ -150,8 +154,8 @@ async def executar_pipeline_factual(nicho_escolhido=None):
             except Exception as e:
                 print(f"⚠️ Erro ao limpar {arq}: {e}")
 
-    print(f"\n✅ VÍDEO CONCLUÍDO COM SUCESSO: {arquivo_resultado}")
-    print(f"📌 Tema: {tema_escolhido}")
+    print(f"\n✅ VÍDEO CONCLUÍDO COM SUCESSO: {novo_nome}")
+    print(f"📌 Tema: {tema_titulo_final}")
 
 
 def menu_interativo():
@@ -172,7 +176,7 @@ def menu_interativo():
     if opcao == "2":
         return "Games"
     if opcao == "3":
-        return "Desenhos e Anime"
+        return "Games" # Anime/Desenhos mapeia para o Agente Games
     if opcao == "4":
         return "Ciência e Espaço"
     if opcao == "5":
@@ -183,12 +187,12 @@ def menu_interativo():
         return "True Crime e Mistérios"
     if opcao == "8":
         from uploader import gerenciar_login
-        perfil = input("Digite o nome do perfil (ex: MundoGamer): ")
-        asyncio.run(gerenciar_login(perfil))
-        return "SKIP"
     if opcao == "9":
         return input("Digite o nicho desejado (ex: Carros Antigos): ")
 
+        perfil = input("Digite o nome do perfil (ex: MundoGamer): ")
+        asyncio.run(gerenciar_login(perfil))
+        return "SKIP"  # Indica para não rodar o pipeline após o login
     return None
 
 

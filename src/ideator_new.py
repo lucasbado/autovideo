@@ -20,7 +20,7 @@ NICHOS = [
 
 def carregar_historico():
     if os.path.exists(HISTORICO_FILE):
-        with open(HISTORICO_FILE, "r", encoding="utf-8") as f:
+        with open(HISTORICO_FILE, "r") as f:
             try:
                 return json.load(f)
             except:
@@ -30,12 +30,9 @@ def carregar_historico():
 
 def salvar_tema(tema):
     hist = carregar_historico()
-    # Adiciona tanto o título quanto a entidade (se possível extrair do título)
     hist.append(tema)
-    # Limita o histórico para não crescer infinitamente, mantendo os últimos 100
-    hist = hist[-100:]
-    with open(HISTORICO_FILE, "w", encoding="utf-8") as f:
-        json.dump(hist, f, indent=4, ensure_ascii=False)
+    with open(HISTORICO_FILE, "w") as f:
+        json.dump(hist, f, indent=4)
 
 
 def gerar_tema_factual(nicho_especifico=None):
@@ -93,10 +90,7 @@ REGRAS:
 
     except Exception:
         from knowledge_base import TEMAS_ESTRUTURADOS
-        # Evita repetir temas do histórico no fallback
-        historico = carregar_historico()
-        disponiveis = [t for t in TEMAS_ESTRUTURADOS if t not in historico]
-        fallback = random.choice(disponiveis if disponiveis else TEMAS_ESTRUTURADOS)
+        fallback = random.choice(TEMAS_ESTRUTURADOS)
         return {"title": fallback, "keywords": fallback.split()[:3]}
 
 
@@ -107,36 +101,8 @@ def gerar_tema_com_base():
     """
     from knowledge_base import ENTIDADES_POR_NICHO
     
-    # Carrega histórico para filtrar entidades já usadas
-    historico = carregar_historico()
-    
-    # Flatten todas as entidades e filtra as que já aparecem no histórico (mesmo que parcialmente)
-    todas_entidades = []
-    for n in ENTIDADES_POR_NICHO.values():
-        todas_entidades.extend(n)
-    
-    disponiveis = []
-    for e in todas_entidades:
-        ja_usada = False
-        for t in historico:
-            if e.lower() in t.lower():
-                ja_usada = True
-                break
-        if not ja_usada:
-            disponiveis.append(e)
-    
-    if not disponiveis:
-        # Se esgotar, limpa o histórico de entidades (opcional) ou apenas ignora filtro
-        disponiveis = todas_entidades
-
-    entidade = random.choice(disponiveis)
-    
-    # Encontra o nicho da entidade para o log
-    nicho_escolhido = "Desconhecido"
-    for k, v in ENTIDADES_POR_NICHO.items():
-        if entidade in v:
-            nicho_escolhido = k
-            break
+    nicho_escolhido = random.choice(list(ENTIDADES_POR_NICHO.keys()))
+    entidade = random.choice(ENTIDADES_POR_NICHO[nicho_escolhido])
 
     print(f"💡 Combinando IA com Entidade Real: {entidade} (Nicho: {nicho_escolhido})")
 
@@ -163,11 +129,12 @@ REGRAS:
         if m:
             json_str = m.group()
             dado = json.loads(json_str)
+            dado['entity'] = entidade # Adiciona a entidade limpa
             return dado
     except:
         pass
     
-    return {"title": f"O segredo por trás de {entidade}", "keywords": [entidade]}
+    return {"title": f"O segredo por trás de {entidade}", "entity": entidade, "keywords": [entidade]}
 
 
 def gerar_tema_da_base_por_nicho(nicho_input):
@@ -193,9 +160,6 @@ def gerar_tema_da_base_por_nicho(nicho_input):
         "Crim": "True Crime e Mistérios"
     }
     
-    # Carrega histórico para filtrar entidades já usadas
-    historico = carregar_historico()
-    
     chave_base = None
     for k, v in mapa.items():
         if k.lower() in nicho_input.lower():
@@ -203,23 +167,8 @@ def gerar_tema_da_base_por_nicho(nicho_input):
             break
             
     if chave_base and chave_base in ENTIDADES_POR_NICHO:
-        # Filtra entidades do nicho que ainda não foram usadas
-        entidades_nicho = ENTIDADES_POR_NICHO[chave_base]
-        disponiveis = []
-        for e in entidades_nicho:
-            ja_usada = False
-            for t in historico:
-                if e.lower() in t.lower():
-                    ja_usada = True
-                    break
-            if not ja_usada:
-                disponiveis.append(e)
-
-        if not disponiveis:
-            disponiveis = entidades_nicho
-
-        entidade = random.choice(disponiveis)
+        entidade = random.choice(ENTIDADES_POR_NICHO[chave_base])
         print(f"💡 Entidade Real Selecionada ({chave_base}): {entidade}")
-        return {"title": f"O segredo oculto de {entidade}", "keywords": [entidade, "secret", "curiosity"]}
+        return {"title": f"O segredo oculto de {entidade}", "entity": entidade, "keywords": [entidade, "secret", "curiosity"]}
     
     return None

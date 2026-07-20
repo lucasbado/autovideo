@@ -20,6 +20,8 @@ REGRAS DE AUDITORIA:
 1. ALUCINAÇÃO: Qualquer informação no roteiro que NÃO esteja nos fatos verificados ou que contradiga um fato.
 2. EXCEÇÃO: Conectores narrativos (ex: "Além disso", "Por outro lado") são permitidos, desde que não alterem o sentido factual.
 3. RIGOR: Se o roteiro inventar um ano, um nome ou um local que não está nos fatos, ele deve ser REPROVADO.
+4. CENA VS. FATO: A descrição dentro de uma tag [SCENE: ...] também é considerada parte do roteiro. Se a descrição da cena contiver detalhes (pessoas, ações, objetos específicos) que não podem ser inferidos diretamente dos fatos, isso é uma ALUCINAÇÃO.
+5. NARRATIVA VS. FATO: Frases introdutórias ou de preenchimento que estabelecem um cenário genérico (ex: "Desde o início dos tempos...", "Um grande mistério...", "Pesquisadores descobriram recentemente...") mas não contêm um fato específico da lista, são consideradas ALUCINAÇÕES.
 
 LISTA DE FATOS VERIFICADOS (FONTE ÚNICA DA VERDADE):
 {fatos_originais}
@@ -60,4 +62,4 @@ RESPOSTA OBRIGATÓRIA (JSON APENAS):
             
     except Exception as e:
         print(f"⚠️ Erro na auditoria de veracidade: {e}")
-        return True, {"justificativa": "Auditoria falhou, procedendo com cautela"} # Fallback permissivo para não travar
+        return False, {"justificativa": f"Auditoria falhou com erro: {e}. Reprovando por segurança."} # Fallback restritivo

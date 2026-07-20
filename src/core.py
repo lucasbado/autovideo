@@ -30,8 +30,60 @@ ARQUIVO_VIDEO_BASE = os.path.join("temp", "video_base.mp4")
 ARQUIVO_FINAL = os.path.join("outputs", "resultado_tiktok.mp4")
 MODELO_LLM = "deepseek-r1:8b"
 MODELO_WHISPER = "small"  # 'small' libera VRAM para o LLM e é rápido na GPU
-
 from config import PEXELS_API_KEY, TEMP_DIR
+
+
+def _traduzir_fatos_para_pt(fatos_json):
+    """Usa um LLM para traduzir os fatos para Português do Brasil."""
+    fatos_originais = fatos_json.get("fatos", [])
+    if not fatos_originais:
+        return fatos_json
+
+    print("🌐 Traduzindo fatos para Português do Brasil...")
+    
+    textos_para_traduzir = [f.get("fato", "") for f in fatos_originais if f.get("fato")]
+    if not textos_para_traduzir:
+        return fatos_json
+
+    prompt = f"""
+    Translate the following list of sentences to Brazilian Portuguese.
+    Respond ONLY with the translated sentences, one per line. Do not add numbers, bullets, or any other text.
+
+    ORIGINAL SENTENCES:
+    {json.dumps(textos_para_traduzir, indent=2, ensure_ascii=False)}
+
+    TRANSLATED SENTENCES (BRAZILIAN PORTUGUESE):
+    """
+    
+    try:
+        resposta = ollama.chat(
+            model="phi4-mini",
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.0}
+        )
+        traducoes_raw = resposta["message"]["content"].strip()
+        traducoes = [line.strip() for line in traducoes_raw.splitlines() if line.strip()]
+        
+        if len(traducoes) == len(textos_para_traduzir):
+            fatos_traduzidos = []
+            idx_traducao = 0
+            for f_original in fatos_originais:
+                novo_fato = f_original.copy()
+                if f_original.get("fato") and idx_traducao < len(traducoes):
+                    novo_fato["fato"] = traducoes[idx_traducao]
+                    idx_traducao += 1
+                fatos_traduzidos.append(novo_fato)
+            
+            fatos_json_traduzido = fatos_json.copy()
+            fatos_json_traduzido["fatos"] = fatos_traduzidos
+            print("✅ Fatos traduzidos com sucesso.")
+            return fatos_json_traduzido
+        else:
+            print(f"⚠️ Erro na tradução: número de frases não corresponde ({len(traducoes)} vs {len(textos_para_traduzir)}). Usando fatos originais.")
+            return fatos_json
+    except Exception as e:
+        print(f"⚠️ Falha ao traduzir fatos: {e}. Usando fatos originais.")
+        return fatos_json
 
 
 async def gerar_audio(texto, voz="pt-BR-AntonioNeural"):
@@ -47,9 +99,12 @@ def gerar_roteiro_factual(fatos_json, nicho=None):
     from agents_config import obter_agente, GLOBAL_SAFETY_RULES, BANNED_PHRASES
     agente = obter_agente(nicho)
 
-    entidade = fatos_json.get("entidade", "Assunto")
-    fatos_str = json.dumps(fatos_json.get("fatos", []), ensure_ascii=False, indent=2)
-    dados_chave = json.dumps(fatos_json.get("dados_chave", {}), ensure_ascii=False)
+    # TRADUZIR FATOS PARA PT-BR ANTES DE GERAR O ROTEIRO
+    fatos_json_pt = _traduzir_fatos_para_pt(fatos_json)
+
+    entidade = fatos_json_pt.get("entidade", "Assunto")
+    fatos_str = json.dumps(fatos_json_pt.get("fatos", []), ensure_ascii=False, indent=2)
+    dados_chave = json.dumps(fatos_json_pt.get("dados_chave", {}), ensure_ascii=False)
 
     print(f"\n🧠 Agente Especialista ({agente['persona']}) gerando roteiro para: '{entidade}'")
 
@@ -57,14 +112,16 @@ def gerar_roteiro_factual(fatos_json, nicho=None):
     tentativa_roteiro = 0
     max_tentativas_roteiro = 3
     roteiro_final_texto = ""
+    failure_reason = ""
     
     while tentativa_roteiro < max_tentativas_roteiro:
         tentativa_roteiro += 1
         
         extra_instruction = ""
         if tentativa_roteiro > 1:
-            print(f"⚠️ Tentativa {tentativa_roteiro}: Roteiro anterior sem tags [SCENE]. Exigindo formato...")
-            extra_instruction = "\nATENÇÃO: Você ESQUECEU das tags [SCENE: ...] no último texto. Se não incluir as tags agora, seu output será DELETADO."
+            reason_text = failure_reason or "não seguiu o formato"
+            print(f"⚠️ Tentativa {tentativa_roteiro}: Roteiro anterior falhou ({reason_text}). Reforçando regras...")
+            extra_instruction = f"\nATENÇÃO: Sua última tentativa falhou porque o roteiro estava '{reason_text}'. Siga TODAS as regras agora ou seu trabalho será descartado."
 
         prompt_texto = f"""
 {GLOBAL_SAFETY_RULES}
@@ -88,19 +145,19 @@ DADOS CHAVE: {dados_chave}
 
 ### REGRAS DE OURO (TOLERÂNCIA ZERO PARA FALHAS):
 1. **ÂNCORA TEMPORAL**: PROIBIDO inventar anos. Se a pesquisa diz "Anos 90", não diga "Hoje em 2014".
-2. **DURAÇÃO (200-250 PALAVRAS)**: Expanda a narração explicando o "COMO" e o "PORQUÊ" técnico.
-3. **FORMATO OBRIGATÓRIO**: Intercale a fala com tags de cena: [SCENE: descrição do visual].
-4. **PROIBIÇÃO DE CLICHÊS**: É TERMINANTEMENTE PROIBIDO usar: {", ".join(BANNED_PHRASES[:15])}.
-5. **VERIFICAÇÃO BIOLÓGICA**: Tardígrados são MULTICELULARES. Eles não foram recuperados da Lua.
-6. **GROUNDING ABSOLUTO**: Se um detalhe não está nos fatos, ele NÃO PODE estar no roteiro. Não adicione "colorido", "emocionante", ou detalhes específicos de ações se não forem citados.
+2. **ORDEM LÓGICA (200-250 PALAVRAS)**: Apresente os fatos em uma ordem lógica. Você pode usar frases curtas para conectar um fato ao outro (ex: "Além disso...", "Isso levou a..."), mas é PROIBIDO criar introduções, conclusões ou contexto narrativo que não esteja explicitamente nos fatos. Apenas reescreva e ordene os fatos.
+3. **FORMATO OBRIGATÓRIO**: Intercale a fala com tags de cena: [SCENE: descrição do visual]. A descrição deve ser um termo de busca para vídeo de banco (em inglês, se possível) e genérico. Ex: [SCENE: old computer screen], [SCENE: animated black hole]. É PROIBIDO descrever ações ou emoções que não estão nos fatos. Ex: [SCENE: sad engineer looking at screen].
+4. **IDIOMA OBRIGATÓRIO**: O roteiro DEVE ser em Português do Brasil. Qualquer outro idioma (inglês, chinês, etc.) no texto final é uma FALHA CRÍTICA.
+5. **PROIBIÇÃO DE CLICHÊS**: É TERMINANTEMENTE PROIBIDO usar: {", ".join(BANNED_PHRASES[:15])}.
+6. **VERIFICAÇÃO BIOLÓGICA**: Tardígrados são MULTICELULARES. Eles não foram recuperados da Lua.
+7. **GROUNDING ABSOLUTO**: Se um detalhe não está nos fatos, ele NÃO PODE estar no roteiro. Não adicione "colorido", "emocionante", ou detalhes específicos de ações se não forem citados.
 
 ### ESTRUTURA OBRIGATÓRIA DA RESPOSTA:
 
 Sua resposta deve ter EXATAMENTE este formato:
 
 <think>
-[Análise técnica. Verifique se tardígrados são unicelulares ou se foram resgatados da Lua (spoiler: não).
-Planeje a inserção de pelo menos 6 tags [SCENE: ...] ao longo do texto.]
+[Análise técnica. Primeiro, vou reler todos os fatos para garantir que entendi. Depois, vou planejar como conectar os fatos em uma história sem inventar informações. Vou verificar se o 'como' e o 'porquê' estão nos fatos antes de mencioná-los. Finalmente, vou inserir as tags de cena.]
 </think>
 
 <fatos_selecionados>
@@ -108,12 +165,10 @@ Planeje a inserção de pelo menos 6 tags [SCENE: ...] ao longo do texto.]
 </fatos_selecionados>
 
 <script>
-[SCENE: ...]
-[Frase 1 de impacto baseada no fato real mais obscuro].
-[Frase 2 detalhando o funcionamento técnico].
-[SCENE: ...]
-...
-[Frase final técnica ou reflexiva].
+[SCENE: ancient greek astrolabe animation]
+O Mecanismo de Antikythera, um antigo computador analógico, foi descoberto em um naufrágio no início do século 20.
+[SCENE: close up on intricate bronze gears]
+Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever com precisão posições astronômicas e eclipses.
 </script>
 
 ### ALERTAS DE ALUCINAÇÃO (NUNCA FAÇA):
@@ -122,6 +177,10 @@ Planeje a inserção de pelo menos 6 tags [SCENE: ...] ao longo do texto.]
 - NÃO confunda "Parachutes" (Paraquedas) com "Screws" (Parafusos).
 - NÃO use o termo "consola" (Portugal), use "console" (Brasil).
 - NÃO adicione diálogos ou cenas de ação fictícias para preencher tempo.
+- NÃO crie frases introdutórias genéricas como "Desde os tempos antigos..." ou "Um dos maiores mistérios...". Vá direto aos fatos.
+- NÃO use marcadores como "[FATO 1]" ou "Fato:" no roteiro final. Apenas escreva o texto.
+- NÃO invente descrições de cena detalhadas. Use termos genéricos para busca de vídeo, como "código na tela", "mapa antigo", "gráfico de dados".
+- **ALERTA FINAL**: SUA REPUTAÇÃO DEPENDE DISSO. SE VOCÊ INVENTAR QUALQUER DADO, A AUDITORIA IRÁ FALHAR E SEU TRABALHO SERÁ DESCARTADO. SEJA LITERAL AOS FATOS.
 - SE O FATO NÃO ESTÁ NA LISTA, ELE NÃO EXISTE PARA ESTE ROTEIRO.
 """
 
@@ -152,6 +211,18 @@ Planeje a inserção de pelo menos 6 tags [SCENE: ...] ao longo do texto.]
                 temp = re.sub(r"<fatos_selecionados>.*?</fatos_selecionados>", "", conteudo_bruto, flags=re.DOTALL).strip()
                 temp = re.sub(r"\*\*Fatos Selecionados:\*\*.*?\n\n", "", temp, flags=re.DOTALL).strip()
                 roteiro_bruto = temp
+
+            # --- VALIDAÇÃO DE IDIOMA (Anti-Chinês/Outros) ---
+            # Regex para detectar caracteres CJK (Chinês, Japonês, Coreano)
+            if re.search(r'[\u4e00-\u9fff]+', roteiro_bruto):
+                failure_reason = "gerou texto em idioma incorreto (chinês detectado)"
+                print(f"⚠️ Tentativa {tentativa_roteiro} falhou: Roteiro gerado é inválido ({failure_reason}).")
+                if tentativa_roteiro < max_tentativas_roteiro:
+                    continue
+                else:
+                    print("❌ Falha crítica: Modelo continuou a gerar em idioma incorreto.")
+                    roteiro_final_texto = ""
+                    break # Sai do loop de tentativas
 
             # VALIDAÇÃO DE TAGS (Obrigatório [ ])
             if "[" not in roteiro_bruto or "]" not in roteiro_bruto:
@@ -207,6 +278,24 @@ Planeje a inserção de pelo menos 6 tags [SCENE: ...] ao longo do texto.]
             roteiro_limpo = re.sub(r"\s+", " ", roteiro_limpo).strip()
             
             roteiro_final_texto = roteiro_limpo
+
+            # --- VALIDAÇÃO DE CONTEÚDO E TAMANHO ---
+            word_count = len(roteiro_final_texto.split())
+            max_words = 400  # O prompt pede 200-250, 400 é um limite generoso.
+            forbidden_keywords = ["assistente de ia", "the villain", "catastrophic event", "human:", "aegis da terra"]
+            
+            is_too_long = word_count > max_words
+            has_forbidden_words = any(kw in roteiro_final_texto.lower() for kw in forbidden_keywords)
+
+            if is_too_long or has_forbidden_words:
+                failure_reason = f"muito longo ({word_count} palavras)" if is_too_long else f"contém keywords proibidas"
+                print(f"⚠️ Tentativa {tentativa_roteiro} falhou: Roteiro gerado é inválido ({failure_reason}).")
+                if tentativa_roteiro < max_tentativas_roteiro:
+                    continue  # Tenta novamente
+                else:
+                    print("❌ Falha crítica: Modelo continuou a gerar roteiros inválidos.")
+                    roteiro_final_texto = ""  # Garante que vai falhar fora do loop
+
             break # Sucesso
             
         except Exception as e:

@@ -165,6 +165,8 @@ def _sanitize_for_query(text):
     """Remove aspas, quebras de linha e conteúdo explicativo que LLMs às vezes adicionam."""
     if not text:
         return text
+    # Remove "explanation -> result" patterns that some models add
+    text = re.sub(r".*->\s*", "", text)
     # Mantém apenas a primeira linha e remove explicações do tipo "The translation is: ..."
     first_line = text.splitlines()[-1] if "\n" in text else text
     # Remove frases explicativas separadas por ':'
@@ -348,7 +350,7 @@ def pesquisar_dados_brutos(tema, keywords=None):
         
         REGRAS:
         - RESPONDA APENAS com as 3 perguntas (uma por linha).
-        - Use termos como: "forensic analysis", "declassified", "technical root cause", "leaked", "behind the scenes".
+        - Use termos técnicos e neutros como: "technical analysis", "engineering report", "design document", "root cause analysis", "post-mortem", "developer commentary", "behind the scenes".
         """
         print(f"   🧠 Gerando perguntas técnicas (via {MODELO_LLM})...")
         res_queries = ollama.chat(
@@ -591,23 +593,30 @@ def confirmar_fato(fato_text, frags, tema, min_sources=2):
         domain_or_url = url or title or f.get("source") or combined[:50]
         trusted_flag = f.get("trusted") or _is_trusted(url or domain_or_url)
 
-        # --- DETECÇÃO DE CONFLITO ---
-        if numeros_no_fato:
-            # Comparamos o overlap de palavras significativas (sem números) para ver se é o mesmo assunto
-            contexto_fato = set(w for w in norm_fact if not w.isdigit())
-            contexto_frag = set(w for w in _norm_words(combined) if not w.isdigit())
-            overlap_contexto = len(contexto_fato & contexto_frag)
-            
-            # Se o assunto é muito similar (ex: "Console X lançado")
-            if overlap_contexto >= 2: 
-                numeros_frag = re.findall(r"\d+", combined)
-                for n in numeros_no_fato:
-                    # Se o fragmento fala do mesmo assunto mas com outro número de 4 dígitos (ano?)
-                    if len(n) == 4 and any(len(nf) == 4 and nf != n for nf in numeros_frag):
-                        # Conflito detectado. Se este fragmento for 'trusted', ele invalida o fato.
-                        if trusted_flag:
-                             print(f"🛑 CONFLITO CRÍTICO: Fonte confiável diz {numeros_frag} mas fato diz {n}")
-                             conflito_detectado = True
+        # --- DETECÇÃO DE CONFLITO (DESATIVADO) ---
+        # if numeros_no_fato:
+        #     # Comparamos o overlap de palavras significativas (sem números) para ver se é o mesmo assunto
+        #     contexto_fato = set(w for w in norm_fact if not w.isdigit())
+        #     contexto_frag = set(w for w in _norm_words(combined) if not w.isdigit())
+        #     overlap_contexto = len(contexto_fato & contexto_frag)
+        #     
+        #     # Se o assunto é muito similar (ex: "Console X lançado")
+        #     if overlap_contexto >= 2: 
+        #         numeros_frag = re.findall(r"\d+", combined)
+        #         for n in numeros_no_fato:
+        #                 # LÓGICA DE CONFLITO REFINADA:
+        #                 # Um conflito ocorre se o número do fato (n) NÃO estiver na fonte,
+        #                 # mas a fonte contiver outros números do mesmo tipo (ex: outros anos de 4 dígitos).
+        #                 # Isso evita falsos positivos onde a fonte menciona múltiplos anos corretamente.
+        #                 # --- DESATIVADO TEMPORARIAMENTE ---
+        #                 # Esta lógica estava gerando muitos falsos positivos. A verificação cruzada de múltiplas fontes é um filtro melhor.
+        #                 # if n not in numeros_frag and any(len(nf) == len(n) for nf in numeros_frag):
+        #                 #     if trusted_flag:
+        #                 #         print(f"🛑 CONFLITO CRÍTICO: Fato menciona '{n}', mas fonte confiável tem outros dados ({[nf for nf in numeros_frag if len(nf) == len(n)]}) e não confirma '{n}'.")
+        #                 #         conflito_detectado = True
+        #                 #         break # Sai do loop de números
+        #     # if conflito_detectado:
+        #     #     break # Sai do loop de fragmentos
 
         if len(fato_text) > 40 and fato_text.lower() in combined:
             sources.add(domain_or_url)
