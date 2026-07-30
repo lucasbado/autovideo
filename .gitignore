@@ -1,22 +1,35 @@
-.venv/
-.venv\
+# Python
 __pycache__/
-__pycache__\
-.idea/
-.idea\
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+.venv/
 env/
-env\
-.env
-outputs/
-outputs\
-data/
-data\
-temp/
-temp\
-*.log
-.vscode/
-.DS_Store
+venv/
 *.sqlite3
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project Data & Logs (Hidden from GitHub)
+temp/
+outputs/
+data/
+vault/
+*.log
+.env
+.env.local
+temas_gerados.json
+
+# MoviePy temporary files
+*TEMP_MPY_wvf_snd.mp4
+*.mp4
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Agent Artifacts
+.artifacts/
