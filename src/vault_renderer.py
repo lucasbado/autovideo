@@ -15,20 +15,15 @@ async def renderizar_video(filepath):
     nicho = metadata.get("nicho")
     termo_busca = metadata.get("termo_busca")
     
-    # Extrair o roteiro do corpo
-    roteiro_match = re.search(r'## Roteiro Final\n\n(.*?)\n', body, re.DOTALL)
-    if not roteiro_match:
-        # Tenta pegar tudo depois do cabeçalho se o regex falhar
-        if "## Roteiro Final" in body:
-            roteiro_com_tags = body.split("## Roteiro Final")[-1].strip()
-        else:
-            print(f"❌ Roteiro não encontrado em {filepath}")
-            return False
+    # Extrair o roteiro do corpo (Lógica robusta: tudo após o cabeçalho)
+    if "## Roteiro Final" in body:
+        roteiro_com_tags = body.split("## Roteiro Final")[-1].strip()
     else:
-        roteiro_com_tags = roteiro_match.group(1).strip()
+        print(f"❌ Roteiro não encontrado em {filepath}")
+        return False
 
-    if not roteiro_com_tags or len(roteiro_com_tags) < 50:
-        print(f"❌ Roteiro inválido ou muito curto em {filepath}")
+    if not roteiro_com_tags or len(roteiro_com_tags) < 100:
+        print(f"❌ Roteiro inválido ou muito curto ({len(roteiro_com_tags)} chars) em {filepath}")
         return False
 
     print(f"\n🎬 Iniciando renderização: {title}")
@@ -37,16 +32,18 @@ async def renderizar_video(filepath):
     roteiro_limpo = re.sub(r'\[SCENE:.*?\]', '', roteiro_com_tags, flags=re.IGNORECASE).strip()
     roteiro_limpo = re.sub(r'\s{2,}', ' ', roteiro_limpo).strip()
 
-    # 2. Obtenção de Vídeos
-    urls_video = core.obter_url_pexels(termo_busca)
+    # 2. Obtenção de Vídeos (Suporte a múltiplos termos)
+    termos_busca = metadata.get("visual_search_terms") or metadata.get("termo_busca")
+    urls_video = core.obter_url_pexels(termos_busca)
     arquivos_video = await core.descarregar_videos(urls_video)
 
     # 3. Estilo
     estilo = obter_estilo(nicho if nicho else "default")
 
     # 4. Áudio e Legendas
-    print("🎙️ Gerando áudio...")
-    await core.gerar_audio(roteiro_limpo, voz=estilo["voz"])
+    print("🎙️ Gerando áudio limpo...")
+    audio_text = core.limpar_roteiro_para_audio(roteiro_com_tags)
+    await core.gerar_audio(audio_text, voz=estilo["voz"])
     
     print("✍️ Gerando legendas...")
     segmentos = core.gerar_legendas()
@@ -73,8 +70,9 @@ async def renderizar_video(filepath):
     return True
 
 async def run_renderer():
-    files = get_files_by_status("script_ready")
-    print(f"📂 Encontrados {len(files)} arquivos aguardando renderização...")
+    # Busca roteiros prontos e também tentativas que falharam anteriormente
+    files = get_files_by_status("script_ready") + get_files_by_status("render_failed")
+    print(f"📂 Encontrados {len(files)} arquivos para renderização...")
     
     for f in files:
         try:

@@ -46,7 +46,7 @@ AGENTES = {
     }
 }
 
-# LISTA NEGRA DE TERMOS (YouTube Clickbait proibido)
+# LISTA NEGRA DE TERMOS (Estilo YouTuber/IA genérica proibido)
 BANNED_PHRASES = [
     "Você sabia?", "Voce sabia?", "Ah,", "Pois bem", "Além disso", "É verdade!", "E verdade!",
     "Mas não para por aí", "Prepare-se para se surpreender", "Incrível, não?",
@@ -55,7 +55,9 @@ BANNED_PHRASES = [
     "Confira agora", "Vamos lá", "Prepare-se", "E aí,", "Olá pessoal",
     "Como isso é possível?", "A chave está na", "A resposta está em", "O futuro é promissor",
     "A resposta provavelmente está", "Um mecanismo que ainda não foi", "Mas por que evoluiram",
-    "Talvez porque", "Surpreendentemente,", "Impressionante,"
+    "Talvez porque", "Surpreendentemente,", "Impressionante,",
+    "Fique até o final", "O que aconteceu a seguir", "Você vai ficar de queixo caído",
+    "Prepare-se para descobrir", "O vídeo de hoje", "Neste vídeo,", "Vamos mergulhar"
 ]
 
 # INSTRUÇÕES GLOBAIS DE SEGURANÇA (Para evitar alucinação e clichês)

@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 
+import re
 # Adiciona o diretório atual ao path para importações
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,6 +30,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
         # 1. Ideação (Usa Banco de Dados de Entidades Reais para garantir qualidade)
         if nicho_escolhido:
             # Se o usuário escolheu um nicho, tentamos pegar uma entidade real desse nicho
+            # Esta função agora é a principal e mais confiável.
             tema_obj = ideator.gerar_tema_da_base_por_nicho(nicho_escolhido)
             if not tema_obj:
                 tema_obj = ideator.gerar_tema_factual(nicho_especifico=nicho_escolhido)
@@ -36,7 +38,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
             tema_obj = ideator.gerar_tema_com_base()
 
         # Validação extra: se a IA retornar um título muito curto ou genérico, descarte imediatamente
-        if not tema_obj or len(str(tema_obj)) < 10:
+        if not tema_obj or len(tema_obj.get("title", "")) < 15:
             print("⚠️ Ideator retornou tema inválido. Tentando novamente...")
             continue
 
@@ -56,10 +58,14 @@ async def executar_pipeline_factual(nicho_escolhido=None):
             tema_pesquisa, keywords=tema_keywords
         )
 
-        # VALIDAÇÃO DE TEMA: Se a pesquisa retornou 0 fragmentos relevantes,
-        # o tema é lixo. Descarte imediatamente.
+        # VALIDAÇÃO DE TEMA: Se a pesquisa com o título falhar, tenta apenas com a entidade
+        if len(texto_bruto) < 3 and isinstance(tema_obj, dict) and tema_obj.get("entity"):
+            print(f"⚠️ Tema '{tema_titulo_final}' falhou. Tentando pesquisa simplificada com a entidade: '{tema_obj.get('entity')}'")
+            tema_pesquisa = tema_obj.get("entity")
+            texto_bruto = researcher.pesquisar_dados_brutos(tema_pesquisa)
+
         if len(texto_bruto) < 3:
-            print(f"⚠️ Tema '{tema_pesquisa}' não retornou resultados de pesquisa suficientes. Descartando...")
+            print(f"⚠️ Tema '{tema_pesquisa}' não retornou resultados suficientes. Descartando...")
             continue
 
         # 3. Resumo e Validação
@@ -86,27 +92,53 @@ async def executar_pipeline_factual(nicho_escolhido=None):
         return
 
     # 4. Geração de Roteiro Grounded (Passando o nicho para o Agente Especialista)
-    roteiro, termo_busca = core.gerar_roteiro_factual(fatos_validados, nicho=nicho_escolhido)
+    roteiro_com_tags, termo_busca = core.gerar_roteiro_factual(fatos_validados, nicho=nicho_escolhido)
 
-    if not roteiro or len(roteiro) < 50:
+    if not roteiro_com_tags or len(roteiro_com_tags) < 50:
         print("❌ Falha ao gerar roteiro factual ou roteiro muito curto.")
         return
 
+    # Limpa as tags [SCENE:...] para a narração e arquivos de texto, mantendo o original para debug.
+    roteiro_limpo = re.sub(r'\[SCENE:.*?\]', '', roteiro_com_tags, flags=re.IGNORECASE).strip()
+    roteiro_limpo = re.sub(r'\s{2,}', ' ', roteiro_limpo).strip()
+
     # 4.5 AUDITORIA DE VERACIDADE (PASSO CRÍTICO ANTI-ALUCINAÇÃO)
-    aprovado, auditoria = verificar_veracidade_roteiro(roteiro, fatos_validados)
+    # Limpa as tags [SCENE:...] do roteiro ANTES de enviar para auditoria para evitar falsos positivos.
+    roteiro_para_auditoria = roteiro_limpo
+    aprovado, auditoria = verificar_veracidade_roteiro(roteiro_para_auditoria, fatos_validados)
     if not aprovado:
-        print("\n" + "="*50)
-        print("🚨 AUDITORIA AUTOMÁTICA REPROVOU O ROTEIRO POR ALUCINAÇÃO!")
-        print(f"   Justificativa: {auditoria.get('justificativa')}")
-        print(f"   Alucinações Detectadas: {auditoria.get('alucinacoes', 'N/A')}")
-        print("="*50 + "\n")
-        # Neste ponto, poderíamos tentar gerar o roteiro novamente com um prompt mais rígido
-        # ou simplesmente descartar o tema e encerrar. Por segurança, vamos encerrar.
-        print("❌ Execução cancelada devido à falha de veracidade. O tema pode ser ruim ou o LLM instável.")
-        return
+        print("\n" + "!"*50)
+        print("🚨 AUDITORIA DETECTOU ALUCINAÇÕES. INICIANDO LOOP DE REPARO...")
+        print(f"   Alucinações: {auditoria.get('alucinacoes')}")
+        
+        # TENTATIVA DE REPARO (SELF-HEALING)
+        roteiro_com_tags, termo_busca = core.gerar_roteiro_factual(
+            fatos_validados, 
+            nicho=nicho_escolhido,
+            alucinacoes_anteriores=auditoria.get('alucinacoes')
+        )
+        
+        if not roteiro_com_tags:
+            print("❌ Falha crítica ao gerar roteiro de reparo.")
+            return
+
+        # Re-auditoria do roteiro reparado
+        roteiro_limpo = re.sub(r'\[SCENE:.*?\]', '', roteiro_com_tags, flags=re.IGNORECASE).strip()
+        aprovado, auditoria = verificar_veracidade_roteiro(roteiro_limpo, fatos_validados)
+        
+        if not aprovado:
+            print("\n" + "="*50)
+            print("🚨 FALHA NO REPARO: ROTEIRO CONTINUA COM ALUCINAÇÕES!")
+            print(f"   Justificativa: {auditoria.get('justificativa')}")
+            print("="*50 + "\n")
+            # Por segurança, vamos encerrar se o reparo também falhar.
+            print("❌ Execução cancelada devido à falha persistente de veracidade.")
+            return
 
     print("✅ Auditoria de veracidade aprovou o roteiro.")
-    print(f"--- ROTEIRO GERADO ---\n{roteiro}")
+
+    print("✅ Auditoria de veracidade aprovou o roteiro.")
+    print(f"--- ROTEIRO GERADO (com tags para debug) ---\n{roteiro_com_tags}")
     print(f"\n[!] Por favor, revise o roteiro acima.")
     confirmacao = input("O roteiro está factual e limpo (S/N)? ")
     if confirmacao.lower() != "s":
@@ -124,7 +156,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
 
     estilo = obter_estilo(nicho_escolhido if nicho_escolhido else "default")
 
-    await core.gerar_audio(roteiro, voz=estilo["voz"])
+    await core.gerar_audio(roteiro_limpo, voz=estilo["voz"])
     segmentos = core.gerar_legendas()
 
     arquivo_resultado = core.montar_video(segmentos, arquivos_video, estilo=estilo)
@@ -139,7 +171,7 @@ async def executar_pipeline_factual(nicho_escolhido=None):
     # Gerar arquivo de metadados para facilitar o upload manual
     with open(novo_nome.replace(".mp4", ".txt"), "w", encoding="utf-8") as f:
         f.write(f"TEMA: {tema_titulo_final}\n")
-        f.write(f"ROTEIRO: {roteiro}\n")
+        f.write(f"ROTEIRO: {roteiro_limpo}\n")
         f.write(f"HASHTAGS: #curiosidades #fatos #{handle}\n")
 
     # 6. Limpeza

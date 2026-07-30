@@ -65,14 +65,18 @@ def sincronizar_vault():
         print(f"⚠️ Pasta {VAULT_KNOWLEDGE_PATH} não encontrada.")
         return False
 
-    files = [f for f in os.listdir(VAULT_KNOWLEDGE_PATH) if f.endswith(".md")]
+    files = []
+    for root, _, filenames in os.walk(VAULT_KNOWLEDGE_PATH):
+        for filename in filenames:
+            if filename.endswith(".md"):
+                files.append(os.path.join(root, filename))
     
     if not files:
         print("ℹ️ Nenhum arquivo .md encontrado em vault/knowledge.")
         return False
 
-    for filename in files:
-        path = os.path.join(VAULT_KNOWLEDGE_PATH, filename)
+    for path in files:
+        filename = os.path.basename(path)
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
             chunks = chunk_text(content, filename)

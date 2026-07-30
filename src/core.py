@@ -6,6 +6,7 @@ import math
 import json
 import re
 import sys
+import multiprocessing
 import edge_tts
 import whisper
 import torch
@@ -30,60 +31,9 @@ ARQUIVO_VIDEO_BASE = os.path.join("temp", "video_base.mp4")
 ARQUIVO_FINAL = os.path.join("outputs", "resultado_tiktok.mp4")
 MODELO_LLM = "deepseek-r1:8b"
 MODELO_WHISPER = "small"  # 'small' libera VRAM para o LLM e é rápido na GPU
-from config import PEXELS_API_KEY, TEMP_DIR
-
-
-def _traduzir_fatos_para_pt(fatos_json):
-    """Usa um LLM para traduzir os fatos para Português do Brasil."""
-    fatos_originais = fatos_json.get("fatos", [])
-    if not fatos_originais:
-        return fatos_json
-
-    print("🌐 Traduzindo fatos para Português do Brasil...")
-    
-    textos_para_traduzir = [f.get("fato", "") for f in fatos_originais if f.get("fato")]
-    if not textos_para_traduzir:
-        return fatos_json
-
-    prompt = f"""
-    Translate the following list of sentences to Brazilian Portuguese.
-    Respond ONLY with the translated sentences, one per line. Do not add numbers, bullets, or any other text.
-
-    ORIGINAL SENTENCES:
-    {json.dumps(textos_para_traduzir, indent=2, ensure_ascii=False)}
-
-    TRANSLATED SENTENCES (BRAZILIAN PORTUGUESE):
-    """
-    
-    try:
-        resposta = ollama.chat(
-            model="phi4-mini",
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.0}
-        )
-        traducoes_raw = resposta["message"]["content"].strip()
-        traducoes = [line.strip() for line in traducoes_raw.splitlines() if line.strip()]
-        
-        if len(traducoes) == len(textos_para_traduzir):
-            fatos_traduzidos = []
-            idx_traducao = 0
-            for f_original in fatos_originais:
-                novo_fato = f_original.copy()
-                if f_original.get("fato") and idx_traducao < len(traducoes):
-                    novo_fato["fato"] = traducoes[idx_traducao]
-                    idx_traducao += 1
-                fatos_traduzidos.append(novo_fato)
-            
-            fatos_json_traduzido = fatos_json.copy()
-            fatos_json_traduzido["fatos"] = fatos_traduzidos
-            print("✅ Fatos traduzidos com sucesso.")
-            return fatos_json_traduzido
-        else:
-            print(f"⚠️ Erro na tradução: número de frases não corresponde ({len(traducoes)} vs {len(textos_para_traduzir)}). Usando fatos originais.")
-            return fatos_json
-    except Exception as e:
-        print(f"⚠️ Falha ao traduzir fatos: {e}. Usando fatos originais.")
-        return fatos_json
+from config import PEXELS_API_KEY, TEMP_DIR, CURRENT_DATE
+from knowledge_base_rag import buscar_conhecimento_local
+from ollama_client import chat_safe, extract_json_from_text
 
 
 async def gerar_audio(texto, voz="pt-BR-AntonioNeural"):
@@ -92,19 +42,46 @@ async def gerar_audio(texto, voz="pt-BR-AntonioNeural"):
     await communicate.save(ARQUIVO_AUDIO)
 
 
-def gerar_roteiro_factual(fatos_json, nicho=None):
+async def gerar_roteiro_factual(fatos_json, nicho=None, alucinacoes_anteriores=None):
     """
     Gera um roteiro estritamente baseado nos fatos fornecidos, usando um Agente Especialista.
+    (FILA DE MODELO para estabilidade)
     """
     from agents_config import obter_agente, GLOBAL_SAFETY_RULES, BANNED_PHRASES
     agente = obter_agente(nicho)
 
-    # TRADUZIR FATOS PARA PT-BR ANTES DE GERAR O ROTEIRO
-    fatos_json_pt = _traduzir_fatos_para_pt(fatos_json)
+    # OS FATOS JÁ CHEGAM TRADUZIDOS DO RESEARCHER
+    entidade = fatos_json.get("entidade", "Assunto")
 
-    entidade = fatos_json_pt.get("entidade", "Assunto")
-    fatos_str = json.dumps(fatos_json_pt.get("fatos", []), ensure_ascii=False, indent=2)
-    dados_chave = json.dumps(fatos_json_pt.get("dados_chave", {}), ensure_ascii=False)
+    # --- TRUNCAMENTO DE FATOS PARA EVITAR CONTEXT OVERFLOW ---
+    fatos_originais = fatos_json.get("fatos", [])
+    max_fatos_no_prompt = 10  # Aumentado para 10 fatos para permitir vídeos de 1min+
+    fatos_para_prompt = fatos_originais[:max_fatos_no_prompt]
+    fatos_str = json.dumps(fatos_para_prompt, ensure_ascii=False, indent=2)
+    
+    # Adiciona instrução de reparo se houver alucinações
+    repair_instruction = ""
+    if alucinacoes_anteriores:
+        repair_instruction = f"""
+### ⚠️ ALERTA DE REPARO ⚠️
+Sua tentativa anterior foi REPROVADA pela auditoria por conter informações inventadas (alucinações).
+POR FAVOR, NÃO REPITA OS SEGUINTES ERROS:
+{json.dumps(alucinacoes_anteriores, indent=2, ensure_ascii=False)}
+
+Certifique-se de ser 100% fiel apenas aos fatos fornecidos abaixo.
+"""
+
+    # BUSCA EXEMPLOS DE ESTILO (RAG)
+    print(f"🧠 Consultando exemplos de estilo no Vault...")
+    exemplos_estilo = buscar_conhecimento_local(f"roteiro sucesso {nicho or ''}", top_k=2)
+    style_instruction = ""
+    if exemplos_estilo:
+        style_instruction = "\n### ESTRUTURA DE ESTILO - EXEMPLOS DE SUCESSO (IGNORE OS FATOS DOS EXEMPLOS):\n"
+        style_instruction += "IMPORTANTE: Use os textos abaixo APENAS para aprender o ritmo, tom e transições. NÃO USE NENHUMA DATA, NOME OU DADO técnico presente nestes exemplos.\n"
+        for i, ex in enumerate(exemplos_estilo):
+            # Limpa o exemplo de tags de cena para focar no tom
+            texto_ex = re.sub(r'\[SCENE:.*?\]', '', ex['text']).strip()
+            style_instruction += f"Modelo de Ritmo {i+1}:\n{texto_ex[:500]}...\n\n"
 
     print(f"\n🧠 Agente Especialista ({agente['persona']}) gerando roteiro para: '{entidade}'")
 
@@ -112,6 +89,7 @@ def gerar_roteiro_factual(fatos_json, nicho=None):
     tentativa_roteiro = 0
     max_tentativas_roteiro = 3
     roteiro_final_texto = ""
+    roteiro_bruto = ""
     failure_reason = ""
     
     while tentativa_roteiro < max_tentativas_roteiro:
@@ -120,85 +98,67 @@ def gerar_roteiro_factual(fatos_json, nicho=None):
         extra_instruction = ""
         if tentativa_roteiro > 1:
             reason_text = failure_reason or "não seguiu o formato"
-            print(f"⚠️ Tentativa {tentativa_roteiro}: Roteiro anterior falhou ({reason_text}). Reforçando regras...")
-            extra_instruction = f"\nATENÇÃO: Sua última tentativa falhou porque o roteiro estava '{reason_text}'. Siga TODAS as regras agora ou seu trabalho será descartado."
+            print(f"⚠️ Tentativa {tentativa_roteiro}: Roteiro anterior falhou ({reason_text}). Enviando prompt limpo com reforço.")
+            extra_instruction = f"\nINSTRUÇÃO ADICIONAL: Sua resposta deve ser EXTREMAMENTE concisa e seguir a estrutura de parágrafos e frases pedida. Não inclua texto extra nem explicações."
 
         prompt_texto = f"""
-{GLOBAL_SAFETY_RULES}
-{extra_instruction}
+Você é um {agente['persona']} especializado em {agente['expertise']}. Seu tom é {agente['tom']}.
+Data Atual: {CURRENT_DATE}.
 
-Você é um {agente['persona']}. 
-Sua especialidade é {agente['expertise']}.
-Seu tom de voz deve ser {agente['tom']}.
+### INSTRUÇÃO DE SEGURANÇA CRÍTICA:
+Você é um sistema de transcrição DOCUMENTAL TÉCNICA. 
+1. Se uma informação não está no JSON abaixo, ela NÃO EXISTE. 
+2. Ignore TOTALMENTE seu conhecimento prévio sobre o tema. 
 
-OBJETIVO: Criar uma NARRAÇÃO CINEMATOGRÁFICA de MAIS DE 60 SEGUNDOS em PORTUGUÊS DO BRASIL.
-O roteiro deve ser um DOCUMENTÁRIO TÉCNICO E SÉRIO. 
+### REGRAS DE NARRATIVA DOCUMENTAL:
+- IMPACTO DIRETO: Comece o roteiro DIRETAMENTE com o fato mais impactante ou a data inicial.
+- CONECTIVIDADE ÉPICA: Não liste fatos. Crie uma teia narrativa. Use advérbios de escala (colossal, ínfimo, devastador, milimétrico).
+- DESFECHO OBRIGATÓRIO: O último parágrafo deve ser uma conclusão ÉPICA sobre o impacto futuro ou o mistério que resta. NÃO repita os fatos iniciais; sintetize a importância.
+- SEM FONTES: Jamais inclua URLs, nomes de sites ou referências tipo "Fonte: ..." dentro do roteiro.
+- META: Escreva um texto denso para bater aproximadamente 1 minuto de vídeo (200-250 palavras).
 
---- 
-### DADOS REAIS DO TEMA (FONTE ÚNICA DE VERDADE)
+### REGRAS DE CONSISTÊNCIA FACTUAL (CRÍTICO):
+1. Use APENAS os fatos do JSON. 
+2. Se o JSON não fala de um detalhe específico, você NÃO PODE citá-lo.
+3. Mantenha-se 100% fiel à verdade contida no arquivo.
+
+{style_instruction}
+
+{repair_instruction}
+
+OBJETIVO: Escrever um roteiro de documentário técnico em PORTUGUÊS DO BRASIL baseado UNICAMENTE nos FATOS fornecidos.
+
+DADOS OBRIGATÓRIOS:
 TEMA: {entidade}
-FATOS VERIFICADOS (Use APENAS o que está aqui): 
-{fatos_str}
+FATOS: {fatos_str}
 
-DADOS CHAVE: {dados_chave}
----
-
-### REGRAS DE OURO (TOLERÂNCIA ZERO PARA FALHAS):
-1. **ÂNCORA TEMPORAL**: PROIBIDO inventar anos. Se a pesquisa diz "Anos 90", não diga "Hoje em 2014".
-2. **ORDEM LÓGICA (200-250 PALAVRAS)**: Apresente os fatos em uma ordem lógica. Você pode usar frases curtas para conectar um fato ao outro (ex: "Além disso...", "Isso levou a..."), mas é PROIBIDO criar introduções, conclusões ou contexto narrativo que não esteja explicitamente nos fatos. Apenas reescreva e ordene os fatos.
-3. **FORMATO OBRIGATÓRIO**: Intercale a fala com tags de cena: [SCENE: descrição do visual]. A descrição deve ser um termo de busca para vídeo de banco (em inglês, se possível) e genérico. Ex: [SCENE: old computer screen], [SCENE: animated black hole]. É PROIBIDO descrever ações ou emoções que não estão nos fatos. Ex: [SCENE: sad engineer looking at screen].
-4. **IDIOMA OBRIGATÓRIO**: O roteiro DEVE ser em Português do Brasil. Qualquer outro idioma (inglês, chinês, etc.) no texto final é uma FALHA CRÍTICA.
-5. **PROIBIÇÃO DE CLICHÊS**: É TERMINANTEMENTE PROIBIDO usar: {", ".join(BANNED_PHRASES[:15])}.
-6. **VERIFICAÇÃO BIOLÓGICA**: Tardígrados são MULTICELULARES. Eles não foram recuperados da Lua.
-7. **GROUNDING ABSOLUTO**: Se um detalhe não está nos fatos, ele NÃO PODE estar no roteiro. Não adicione "colorido", "emocionante", ou detalhes específicos de ações se não forem citados.
-
-### ESTRUTURA OBRIGATÓRIA DA RESPOSTA:
-
-Sua resposta deve ter EXATAMENTE este formato:
-
-<think>
-[Análise técnica. Primeiro, vou reler todos os fatos para garantir que entendi. Depois, vou planejar como conectar os fatos em uma história sem inventar informações. Vou verificar se o 'como' e o 'porquê' estão nos fatos antes de mencioná-los. Finalmente, vou inserir as tags de cena.]
-</think>
-
-<fatos_selecionados>
-[Números dos fatos usados]
-</fatos_selecionados>
-
-<script>
-[SCENE: ancient greek astrolabe animation]
-O Mecanismo de Antikythera, um antigo computador analógico, foi descoberto em um naufrágio no início do século 20.
-[SCENE: close up on intricate bronze gears]
-Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever com precisão posições astronômicas e eclipses.
-</script>
-
-### ALERTAS DE ALUCINAÇÃO (NUNCA FAÇA):
-- NÃO invente armas (revólveres, bombas, pistolas) se não citadas nos fatos.
-- NÃO invente perigo de morte imediata (vácuo letal, explosões) se não citado.
-- NÃO confunda "Parachutes" (Paraquedas) com "Screws" (Parafusos).
-- NÃO use o termo "consola" (Portugal), use "console" (Brasil).
-- NÃO adicione diálogos ou cenas de ação fictícias para preencher tempo.
-- NÃO crie frases introdutórias genéricas como "Desde os tempos antigos..." ou "Um dos maiores mistérios...". Vá direto aos fatos.
-- NÃO use marcadores como "[FATO 1]" ou "Fato:" no roteiro final. Apenas escreva o texto.
-- NÃO invente descrições de cena detalhadas. Use termos genéricos para busca de vídeo, como "código na tela", "mapa antigo", "gráfico de dados".
-- **ALERTA FINAL**: SUA REPUTAÇÃO DEPENDE DISSO. SE VOCÊ INVENTAR QUALQUER DADO, A AUDITORIA IRÁ FALHAR E SEU TRABALHO SERÁ DESCARTADO. SEJA LITERAL AOS FATOS.
-- SE O FATO NÃO ESTÁ NA LISTA, ELE NÃO EXISTE PARA ESTE ROTEIRO.
+REGRAS DE FORMATAÇÃO:
+1. Escreva de 4 a 6 parágrafos densos (máximo de 4 frases cada).
+2. Intercale o texto com tags de cena genéricas em inglês. Exemplo: [SCENE: deep space view].
+3. O roteiro deve estar contido EXCLUSIVAMENTE dentro das tags <script> e </script>.
 """
 
         try:
-            print(f"🧠 Enviando prompt ao {MODELO_LLM} (Tentativa {tentativa_roteiro})...")
-            res_texto = ollama.chat(
+            print(f"🧠 Enviando prompt ao {MODELO_LLM} (Modo Narrativo 3.4 - Tentativa {tentativa_roteiro})...")
+            
+            res_texto = await chat_safe(
                 model=MODELO_LLM, 
                 messages=[{"role": "user", "content": prompt_texto}],
-                options={"temperature": 0.3}
+                options={"temperature": 0.5, "num_predict": 4096} # Aumentado para evitar cortes
             )
+            
+            if not res_texto: return None, None
+            
             conteudo_bruto = res_texto["message"]["content"].strip()
             
-            # Limpeza DeepSeek
+            # Limpeza DeepSeek (Think blocks já tratados no chat_safe se usarmos extract_json, mas aqui é texto livre)
             conteudo_bruto = re.sub(r"<think>.*?</think>", "", conteudo_bruto, flags=re.DOTALL).strip()
 
             # Extração
-            if "<script>" in conteudo_bruto:
-                roteiro_bruto = re.search(r"<script>(.*?)</script>", conteudo_bruto, re.DOTALL).group(1).strip()
+            roteiro_bruto = ""
+            script_match = re.search(r"<script>(.*?)</script>", conteudo_bruto, re.DOTALL)
+            if script_match:
+                roteiro_bruto = script_match.group(1).strip()
             elif "**Script**" in conteudo_bruto:
                 roteiro_bruto = conteudo_bruto.split("**Script**")[-1].strip()
             elif "Script:" in conteudo_bruto:
@@ -227,9 +187,11 @@ Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever c
             # VALIDAÇÃO DE TAGS (Obrigatório [ ])
             if "[" not in roteiro_bruto or "]" not in roteiro_bruto:
                 if tentativa_roteiro < max_tentativas_roteiro:
+                    failure_reason = "ausência de tags [SCENE]"
                     continue
                 else:
                     print("❌ Falha crítica: Modelo se recusa a incluir tags visuais.")
+                    return None, None # RETORNA NULO PARA FORÇAR RETRY OU REPARO
 
             # --- FILTRO DE METALINGUAGEM (Anti-Explicação da IA) ---
             meta_talk_patterns = [
@@ -277,6 +239,9 @@ Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever c
             roteiro_limpo = re.sub(r"\n+", " ", roteiro_limpo)
             roteiro_limpo = re.sub(r"\s+", " ", roteiro_limpo).strip()
             
+            # --- LIMPEZA DE CABEÇALHOS DE IA (Fonte, Script, etc) ---
+            roteiro_limpo = re.sub(r"^(Fonte|Source|Script|Roteiro|Narrador|Cena).*?:\s*", "", roteiro_limpo, flags=re.IGNORECASE)
+            
             roteiro_final_texto = roteiro_limpo
 
             # --- VALIDAÇÃO DE CONTEÚDO E TAMANHO ---
@@ -290,6 +255,7 @@ Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever c
             if is_too_long or has_forbidden_words:
                 failure_reason = f"muito longo ({word_count} palavras)" if is_too_long else f"contém keywords proibidas"
                 print(f"⚠️ Tentativa {tentativa_roteiro} falhou: Roteiro gerado é inválido ({failure_reason}).")
+                print(f"   --- CONTEÚDO REPROVADO ---\n{roteiro_final_texto[:1000]}...\n   -------------------------") # Mostra o início do roteiro inválido
                 if tentativa_roteiro < max_tentativas_roteiro:
                     continue  # Tenta novamente
                 else:
@@ -308,76 +274,104 @@ Ele usava um complexo sistema com mais de 30 engrenagens de bronze para prever c
     print(f"🤖 Gerando metadados e termos de busca visual (via phi4-mini)...")
 
     prompt_json = f"""
-    Com base no ROTEIRO abaixo, gere um JSON para automação.
-    O 'visual_search' deve ser um termo em inglês que represente fielmente a entidade {entidade}.
+    Com base no ROTEIRO abaixo, gere um JSON para automação visual.
     
     ROTEIRO:
     {roteiro_final_texto}
     
-    ESTRUTURA:
+    MISSÃO: Gerar uma lista de 6 a 8 termos de busca visual (visual_search_terms) em INGLÊS.
+    
+    REGRAS DE CURADORIA VISUAL:
+    1. OBJETOS CONCRETOS: Não use termos abstratos como "survival", "secret", "history", "discovery" ou "mystery".
+    2. ANALOGIAS CIENTÍFICAS: Se o tema for microscópico ou raro, use termos relacionados: "microscope", "bacteria animation", "laboratory", "dna", "deep space", "astronomy", "cinematic nature".
+    3. DIVERSIDADE: Varie os termos para não repetir o mesmo visual o vídeo todo.
+    4. IDIOMA: Os termos DEVEM ser em inglês.
+    
+    ESTRUTURA OBRIGATÓRIA:
     {{
-      "titulo": "Título Factual",
-      "descricao": "...",
-      "visual_search": "termo em ingles para pexels",
-      "hashtags": ["#curiosidade", "#historia", "#fato"]
+      "titulo": "Título Curto",
+      "visual_search_terms": ["term 1", "term 2", "term 3", "term 4", "term 5", "term 6"],
+      "hashtags": ["#tag1", "#tag2"]
     }}
     """
 
     try:
-        # Usando phi4-mini para metadados por ser mais rápido e estável para JSON simples
-        resposta = ollama.chat(
+        # Usando phi4-mini para metadados (Fila Segura)
+        resposta = await chat_safe(
             model="phi4-mini", 
             messages=[{"role": "user", "content": prompt_json}],
-            options={"temperature": 0.1}
+            options={"temperature": 0.1},
+            format="json"
         )
-        resposta_texto = resposta["message"]["content"].strip()
-        print(f"✅ Metadados processados.")
         
-        json_match = re.search(r"\{.*\}", resposta_texto, re.DOTALL)
-        if json_match:
-            dados_ia = json.loads(json_match.group())
-        else:
-            dados_ia = json.loads(resposta_texto)
+        if not resposta:
+            return roteiro_final_texto, [f"{entidade} cinematic"]
+            
+        dados_ia = extract_json_from_text(resposta["message"]["content"])
+        
+        if not dados_ia or "visual_search_terms" not in dados_ia:
+            print("   ⚠️ Falha no parse JSON de metadados, usando fallback...")
+            return roteiro_final_texto, [f"{entidade} cinematic", "science", "documentary"]
 
-        termo_busca = dados_ia.get("visual_search", f"{entidade} cinematic")
+        termos_busca = dados_ia.get("visual_search_terms", [f"{entidade} cinematic"])
+        print(f"✅ Curadoria Visual pronta. Termos: {', '.join(termos_busca)}")
         
         # Garante que não há marcas de roteiro no texto final
         final_script = roteiro_bruto.strip()
         if not final_script.endswith("."):
             final_script += "."
             
-        return final_script, termo_busca
+        return final_script, termos_busca
+
     except Exception as e:
         print(f"⚠️ Erro ao formatar metadados: {e}")
-        return roteiro_final_texto, f"{entidade} cinematic"
+        return roteiro_final_texto, [f"{entidade} cinematic"]
 
 
-def obter_url_pexels(termo_ingles):
-    print(f"🔍 A procurar múltiplos vídeos no Pexels para: '{termo_ingles}'...")
-    url = f"https://api.pexels.com/videos/search?query={termo_ingles}&orientation=portrait&size=medium&per_page=5"
+def obter_url_pexels(termos_lista):
+    """
+    Realiza múltiplas buscas no Pexels e mescla os resultados para maior variedade.
+    """
+    if not isinstance(termos_lista, list):
+        termos_lista = [str(termos_lista)]
+
+    print(f"🔍 Curadoria Visual: Pesquisando {len(termos_lista)} termos no Pexels...")
     headers = {"Authorization": PEXELS_API_KEY}
+    links_finais = []
 
-    try:
-        resposta = requests.get(url, headers=headers)
-        resposta.raise_for_status()
-        dados = resposta.json()
+    # Faz uma busca pequena para cada termo para garantir diversidade
+    for termo in termos_lista[:8]: # Limite de 8 buscas por vídeo
+        try:
+            # Pega apenas 2-3 vídeos por termo
+            url = f"https://api.pexels.com/videos/search?query={termo}&orientation=portrait&size=medium&per_page=3"
+            resposta = requests.get(url, headers=headers, timeout=10)
+            resposta.raise_for_status()
+            dados = resposta.json()
 
-        if not dados.get("videos"):
-            return ["https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"]
+            for video in dados.get("videos", []):
+                v_files = video.get("video_files", [])
+                # Prioriza HD mp4
+                link = v_files[0]["link"]
+                for f in v_files:
+                    if f.get("quality") == "hd" and f.get("file_type") == "video/mp4":
+                        link = f["link"]
+                        break
+                if link not in links_finais:
+                    links_finais.append(link)
+        except Exception as e:
+            print(f"   ⚠️ Falha ao buscar termo '{termo}': {e}")
+            continue
 
-        links = []
-        for video in dados["videos"]:
-            video_files = video["video_files"]
-            link_download = video_files[0]["link"]
-            for f in video_files:
-                if f["quality"] == "hd" and f["file_type"] == "video/mp4":
-                    link_download = f["link"]
-                    break
-            links.append(link_download)
-
-        return links
-    except Exception:
+    # Se não achou nada, usa o fallback clássico
+    if not links_finais:
+        print("   ⚠️ Nenhum vídeo encontrado nos termos da IA. Usando fallback...")
         return ["https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"]
+
+    # Embaralha para que a sequência não seja previsível
+    random.shuffle(links_finais)
+    
+    # Limita a 12 vídeos totais (suficiente para 1min+)
+    return links_finais[:12]
 
 
 async def descarregar_videos(urls, dest_dir=TEMP_DIR, max_concurrency=3, retries=3):
@@ -468,7 +462,19 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
             inicio_aleatorio = random.uniform(0, inicio_maximo)
             cena = video_escolhido.subclipped(inicio_aleatorio, inicio_aleatorio + duracao_cena)
 
-        cena = cena.resized(height=1920)
+        # --- REDIMENSIONAMENTO INTELIGENTE 9:16 (Arquitetura 3.5) ---
+        # Calcula qual dimensão deve ser a âncora para preencher 1080x1920 sem deixar bordas
+        ratio_original = cena.w / cena.h
+        ratio_alvo = 1080 / 1920
+
+        if ratio_original > ratio_alvo:
+            # Vídeo é mais largo que o alvo (ex: horizontal): fixa altura e corta laterais
+            cena = cena.resized(height=1920)
+        else:
+            # Vídeo é mais estreito que o alvo: fixa largura e corta topo/base
+            cena = cena.resized(width=1080)
+
+        # Centraliza e corta para o tamanho exato do TikTok/Reels
         cena = cena.cropped(x_center=int(cena.w / 2), y_center=int(cena.h / 2), width=1080, height=1920)
 
         if i % 2 == 0:
@@ -483,18 +489,20 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
     print("✍️ Gerando legendas customizadas...")
     clipes_extras = []
 
-    handle_text = estilo.get("handle", "@Curiosidades")
+    handle_text = estilo.get("handle", "@Fatos").upper()
     watermark = (
         TextClip(
             text=handle_text,
             font=estilo["font"],
-            font_size=40,
+            font_size=35, # Ligeiramente menor para caber melhor
             color="white",
             method="caption",
-            size=(300, None),
+            size=(400, None), # Largura aumentada para não cortar nomes longos
+            text_align="center",
         )
-        .with_opacity(0.5)
-        .with_position(("right", "top"))
+        .with_opacity(0.4)
+        # Posição com margem de segurança (20px da borda)
+        .with_position(("right", 20)) 
         .with_duration(duracao_final)
         .with_start(0)
     )
@@ -515,7 +523,8 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
 
         for item in itens:
             texto_seguro = f" {item['text']} "
-            largura_segura = int(1080 * 0.90)
+            # LARGURA SEGURA (Arquitetura 3.5): 80% da tela para evitar cortes verticais
+            largura_segura = int(1080 * 0.80)
 
             txt_clip = TextClip(
                 text=texto_seguro,
@@ -542,7 +551,24 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
     nome_final = os.path.join("outputs", f"video_{timestamp}.mp4")
 
     print(f"⏳ Renderizando Vídeo Viral ({duracao_final:.2f}s)...")
-    video_final.write_videofile(nome_final, fps=30, codec="libx264", audio_codec="aac", logger="bar")
+    
+    # --- RENDERIZAÇÃO TURBO (Arquitetura 3.7) ---
+    # Detecta núcleos do processador para multi-threading
+    n_cores = multiprocessing.cpu_count()
+    
+    video_final.write_videofile(
+        nome_final, 
+        fps=30, 
+        codec="h264_nvenc", # Aceleração por GPU NVIDIA
+        audio_codec="aac", 
+        threads=n_cores,    # Usa todos os núcleos da CPU para auxílio
+        logger="bar",
+        ffmpeg_params=[
+            "-preset", "fast",    # Preset de velocidade da NVIDIA
+            "-tune", "hq",        # Sintonia de alta qualidade
+            "-pix_fmt", "yuv420p" # Compatibilidade padrão
+        ]
+    )
 
     audio.close()
     for v in clips_de_fundo:
@@ -551,6 +577,27 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
 
     return nome_final
 
+
+def limpar_roteiro_para_audio(texto):
+    """
+    Remove tags de título, marcas de cena e pontuação órfã para garantir um áudio limpo.
+    """
+    if not texto: return ""
+    
+    # 1. Remove tags [TITLE: ...] e [SCENE: ...]
+    texto_limpo = re.sub(r'\[TITLE:.*?\]', '', texto, flags=re.IGNORECASE)
+    texto_limpo = re.sub(r'\[SCENE:.*?\]', '', texto_limpo, flags=re.IGNORECASE)
+    
+    # 2. Remove cabeçalhos de IA comuns no início
+    texto_limpo = re.sub(r'^(Fonte|Source|Script|Roteiro|Narrador|Cena|Hook|Introdução).*?:\s*', '', texto_limpo, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # 3. Limpa pontuação órfã no início de frases/parágrafos (ex: ", as tardígradas")
+    texto_limpo = re.sub(r'(^|[\.\?\!])\s*[,;:]\s*', r'\1 ', texto_limpo)
+    
+    # 4. Remove múltiplos espaços e novas linhas excessivas
+    texto_limpo = re.sub(r'\s+', ' ', texto_limpo).strip()
+    
+    return texto_limpo
 
 async def main(tema_externo=None):
     from researcher import pesquisar_dados_brutos, gerar_resumo_factual, validar_densidade
@@ -572,18 +619,18 @@ async def main(tema_externo=None):
 
     print(f"🚀 Iniciando geração automatizada para o tema: '{tema_title}' | keywords: {tema_keywords}")
 
-    bruto = pesquisar_dados_brutos(tema_title, keywords=tema_keywords)
-    fatos = gerar_resumo_factual(bruto, tema_title, use_llm=False)
+    bruto = await pesquisar_dados_brutos(tema_title, keywords=tema_keywords)
+    fatos = await gerar_resumo_factual(bruto, tema_title, use_llm=False)
 
     if not fatos:
         print("ℹ️ Extração local insuficiente. Tentando LLM para resumo factual...")
-        fatos = gerar_resumo_factual(bruto, tema_title, use_llm=True)
+        fatos = await gerar_resumo_factual(bruto, tema_title, use_llm=True)
 
     if not validar_densidade(fatos):
         print("❌ Fatos insuficientes. Encerrando.")
         return
 
-    roteiro, termo_busca = gerar_roteiro_factual(fatos)
+    roteiro, termo_busca = await gerar_roteiro_factual(fatos)
 
     if not roteiro:
         return

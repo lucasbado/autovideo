@@ -30,9 +30,29 @@ async def chat_safe(model, messages, options=None, format=None):
             print(f"❌ Erro na chamada segura ao Ollama ({model}): {e}")
             return None
 
+def recursive_clean_strings(data):
+    """
+    Remove recursivamente aspas extras, colchetes de lista e caracteres de escape
+    que a IA às vezes insere por erro dentro de valores de string.
+    """
+    if isinstance(data, dict):
+        return {k: recursive_clean_strings(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [recursive_clean_strings(i) for i in data]
+    elif isinstance(data, str):
+        # Remove [" e "] ou [' e ']
+        s = re.sub(r'^\[\s*["\']', '', data)
+        s = re.sub(r'["\']\s*\]$', '', s)
+        # Remove aspas duplas/simples no início e fim se sobraram
+        s = s.strip().strip('"').strip("'")
+        # Remove barras de escape desnecessárias
+        s = s.replace('\\"', '"').replace("\\'", "'")
+        return s
+    return data
+
 def extract_json_from_text(text):
     """
-    Extrai e limpa JSON de uma resposta de texto da IA.
+    Extrai, limpa e normaliza JSON de uma resposta de texto da IA.
     """
     if not text:
         return None
@@ -49,7 +69,9 @@ def extract_json_from_text(text):
         json_str = re.sub(r",\s*([\]\}])", r"\1", json_str) # Trailing commas
         
         try:
-            return json.loads(json_str)
+            dados = json.loads(json_str)
+            # APLICA FAXINA NAS STRINGS
+            return recursive_clean_strings(dados)
         except json.JSONDecodeError:
             return None
     return None

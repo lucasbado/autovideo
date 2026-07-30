@@ -5,12 +5,77 @@ from datetime import datetime
 
 VAULT_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "vault")
 PRODUCTION_PATH = os.path.join(VAULT_PATH, "production")
+KNOWLEDGE_PATH = os.path.join(VAULT_PATH, "knowledge")
+CARDS_PATH = os.path.join(KNOWLEDGE_PATH, "cards")
+SCRIPTS_PATH = os.path.join(KNOWLEDGE_PATH, "successful_scripts")
 
 def slugify(text):
     text = text.lower()
     text = re.sub(r'[^\w\s-]', '', text)
     text = re.sub(r'[\s_-]+', '-', text)
     return text.strip('-')
+
+def save_knowledge_card(fatos_json):
+    """
+    Salva uma pesquisa validada como uma nota permanente de conhecimento.
+    """
+    entidade = fatos_json.get("entidade", "Sem Nome")
+    slug = slugify(entidade)
+    filepath = os.path.join(CARDS_PATH, f"{slug}.md")
+    
+    os.makedirs(CARDS_PATH, exist_ok=True)
+    
+    # Formata fatos para o Obsidian
+    fatos_markdown = ""
+    for f in fatos_json.get("fatos", []):
+        fatos_markdown += f"- **Fato**: {f.get('fato')}\n  - *Detalhe*: {f.get('detalhe')}\n"
+    
+    frontmatter = {
+        "tags": ["conhecimento", "pesquisado"],
+        "entidade": entidade,
+        "data_pesquisa": datetime.now().strftime("%Y-%m-%d"),
+        "links": [f"[[{entidade}]]"]
+    }
+    
+    fm_str = "---\n"
+    for k, v in frontmatter.items():
+        fm_str += f"{k}: {json.dumps(v, ensure_ascii=False)}\n"
+    fm_str += "---\n\n"
+    
+    content = fm_str + f"# {entidade}\n\n## Fatos Pesquisados\n{fatos_markdown}\n"
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+    return filepath
+
+def save_successful_script(metadata, roteiro_texto):
+    """
+    Salva um roteiro aprovado como exemplo de estilo.
+    """
+    tema = metadata.get("tema", "Sem Tema")
+    slug = slugify(tema)
+    filepath = os.path.join(SCRIPTS_PATH, f"{slug}.md")
+    
+    os.makedirs(SCRIPTS_PATH, exist_ok=True)
+    
+    frontmatter = {
+        "tags": ["exemplo_estilo", "roteiro_sucesso"],
+        "tema": tema,
+        "nicho": metadata.get("nicho", "default"),
+        "data_aprovacao": datetime.now().strftime("%Y-%m-%d"),
+        "score_auditoria": metadata.get("auditoria_score", 1.0)
+    }
+    
+    fm_str = "---\n"
+    for k, v in frontmatter.items():
+        fm_str += f"{k}: {json.dumps(v, ensure_ascii=False)}\n"
+    fm_str += "---\n\n"
+    
+    content = fm_str + f"# Roteiro: {tema}\n\n{roteiro_texto}\n"
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+    return filepath
 
 def create_markdown_file(tema_obj, status="idea"):
     """

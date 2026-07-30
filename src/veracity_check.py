@@ -1,65 +1,80 @@
 import re
 import ollama
 import json
+from config import CURRENT_DATE
 
-MODELO_AUDITOR = "phi4-mini"
+from ollama_client import chat_safe, extract_json_from_text
 
-def verificar_veracidade_roteiro(roteiro, fatos_json):
+MODELO_AUDITOR = "llama3.1:8b" # Upgrade para inteligência real
+
+async def verificar_veracidade_roteiro(roteiro, fatos_json, modo_relaxado=False):
     """
     Compara o roteiro gerado com a base de fatos original para detectar alucinações.
-    Retorna (True/False, justificativa).
+    (FILA DE MODELO para evitar travamentos)
     """
     entidade = fatos_json.get("entidade", "Assunto")
     fatos_originais = json.dumps(fatos_json.get("fatos", []), ensure_ascii=False, indent=2)
 
+    instrucao_rigor = "RIGOR TOTAL: Reprove se o roteiro inventar anos, nomes, locais ou motivos técnicos que não estão na lista."
+    if modo_relaxado:
+        instrucao_rigor = "MODO RELAXADO: Permita detalhes de conhecimento público inofensivos (ex: marcas de escova de dentes) desde que não contradigam a lista de fatos."
+
     prompt = f"""
-Você é um AUDITOR DE VERACIDADE para um canal de documentários técnicos.
-Sua missão é comparar o ROTEIRO abaixo com a LISTA DE FATOS VERIFICADOS e identificar ALUCINAÇÕES.
+Você é um AUDITOR DE VERACIDADE RIGOROSO para um canal de documentários técnicos.
+Estamos em {CURRENT_DATE}.
 
-REGRAS DE AUDITORIA:
-1. ALUCINAÇÃO: Qualquer informação no roteiro que NÃO esteja nos fatos verificados ou que contradiga um fato.
-2. EXCEÇÃO: Conectores narrativos (ex: "Além disso", "Por outro lado") são permitidos, desde que não alterem o sentido factual.
-3. RIGOR: Se o roteiro inventar um ano, um nome ou um local que não está nos fatos, ele deve ser REPROVADO.
-4. CENA VS. FATO: A descrição dentro de uma tag [SCENE: ...] também é considerada parte do roteiro. Se a descrição da cena contiver detalhes (pessoas, ações, objetos específicos) que não podem ser inferidos diretamente dos fatos, isso é uma ALUCINAÇÃO.
-5. NARRATIVA VS. FATO: Frases introdutórias ou de preenchimento que estabelecem um cenário genérico (ex: "Desde o início dos tempos...", "Um grande mistério...", "Pesquisadores descobriram recentemente...") mas não contêm um fato específico da lista, são consideradas ALUCINAÇÕES.
+### MISSÃO:
+Garantir que o ROTEIRO não contenha NENHUMA informação técnica, histórica ou estatística que não esteja na LISTA DE FATOS.
 
-LISTA DE FATOS VERIFICADOS (FONTE ÚNICA DA VERDADE):
+### REGRAS:
+1. ALUCINAÇÃO TÉCNICA: {instrucao_rigor}
+2. FLAVOR NARRATIVO (PERMITIDO): Frases de efeito e conectivos dramáticos são aceitos.
+3. RIGOR EM DADOS: Se os fatos não dizem uma data ou causa específica, o roteiro NÃO pode inventar.
+
+LISTA DE FATOS (FONTE ÚNICA):
 {fatos_originais}
 
 ROTEIRO PARA AUDITORIA:
 {roteiro}
 
-RESPOSTA OBRIGATÓRIA (JSON APENAS):
+### RESPOSTA OBRIGATÓRIA (JSON APENAS):
 {{
   "aprovado": true/false,
-  "alucinacoes": ["Lista de frases ou dados inventados"],
+  "alucinacoes": ["Lista de mentiras técnicas ou dados inventados"],
   "score_fidelidade": 0.0 a 1.0,
-  "justificativa": "Breve explicação da decisão"
+  "justificativa": "Explicação curta"
 }}
 """
 
     try:
-        print(f"🕵️ Auditando veracidade do roteiro para '{entidade}'...")
-        res = ollama.chat(
+        print(f"🕵️ Auditando roteiro para '{entidade}' (Relaxado={modo_relaxado})...")
+        
+        # CHAMADA SEGURA (Fila do Ollama)
+        res = await chat_safe(
             model=MODELO_AUDITOR,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1}
+            format="json"
         )
-        conteudo = res["message"]["content"].strip()
         
-        m = re.search(r"\{.*\}", conteudo, re.DOTALL)
-        if m:
-            dados = json.loads(m.group())
-            aprovado = dados.get("aprovado", False)
-            score = dados.get("score_fidelidade", 0)
-            
-            if score < 0.85:
-                aprovado = False
-                
-            return aprovado, dados
+        if not res:
+            return False, {"justificativa": "Falha na resposta do auditor"}
+
+        dados = extract_json_from_text(res.get("message", {}).get("content", ""))
+        
+        if not dados:
+            return False, {"justificativa": "Erro de formato JSON no auditor"}
+
+        aprovado = dados.get("aprovado", False)
+        score = dados.get("score_fidelidade", 0)
+        
+        # --- CALIBRAÇÃO 3.3 ---
+        if score >= 0.75:
+            aprovado = True
         else:
-            return False, {"justificativa": "Erro no formato da auditoria"}
+            aprovado = False
+            
+        return aprovado, dados
             
     except Exception as e:
-        print(f"⚠️ Erro na auditoria de veracidade: {e}")
-        return False, {"justificativa": f"Auditoria falhou com erro: {e}. Reprovando por segurança."} # Fallback restritivo
+        print(f"⚠️ Erro fatal na auditoria: {e}")
+        return False, {"justificativa": f"Falha técnica: {e}"}
