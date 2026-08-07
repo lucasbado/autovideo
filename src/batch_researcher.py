@@ -1,7 +1,7 @@
 import asyncio
 import os
 import json
-from ideator_new import gerar_tema_factual, gerar_tema_com_base, gerar_tema_da_base_por_nicho
+from ideator_new import gerar_tema_factual, gerar_tema_com_base, gerar_tema_da_base_por_nicho, expandir_nicho
 from researcher import pesquisar_dados_brutos, gerar_resumo_factual, validar_densidade, traduzir_fatos_json
 from vault_manager import create_markdown_file, update_markdown_file, save_knowledge_card
 
@@ -16,12 +16,12 @@ async def processar_tema(tema_obj, nicho=None):
     print(f"\n🔍 Pesquisando: {title}")
     
     # Cria o arquivo no vault com status 'researching'
-    tema_obj["nicho"] = nicho or "default"
+    tema_obj["nicho"] = nicho or tema_obj.get("nicho", "default")
     filepath = create_markdown_file(tema_obj, status="researching")
     
     try:
-        # Pesquisa dados brutos (AGORA ASYNC)
-        bruto = await pesquisar_dados_brutos(entity, keywords=keywords)
+        # Pesquisa dados brutos (AGORA COM BLINDAGEM DE NICHO)
+        bruto = await pesquisar_dados_brutos(entity, keywords=keywords, nicho=nicho)
         
         if len(bruto) < 3:
             print(f"⚠️ Poucos resultados para {entity}. Abortando.")
@@ -51,6 +51,8 @@ async def processar_tema(tema_obj, nicho=None):
             try:
                 save_knowledge_card(fatos_json)
                 print(f"🧠 Conhecimento arquivado em cards.")
+                # EXPANDE O CONHECIMENTO (DESCOBERTA RECURSIVA)
+                await expandir_nicho(entity, fatos_json)
             except Exception as e:
                 print(f"⚠️ Erro ao arquivar conhecimento: {e}")
 

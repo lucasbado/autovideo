@@ -47,6 +47,14 @@ async def preparar_roteiro(filepath):
     roteiro_limpo = re.sub(r'\[SCENE:.*?\]', '', roteiro_com_tags, flags=re.IGNORECASE).strip()
     roteiro_limpo = re.sub(r'\s{2,}', ' ', roteiro_limpo).strip()
     
+    # --- LANGUAGE GUARD 2.0 ---
+    english_indicators = [" the ", " this ", " with ", " from ", " where ", " when "]
+    if sum(1 for w in english_indicators if w in f" {roteiro_limpo.lower()} ") >= 2:
+        print(f"⚠️ Detectado idioma inglês no roteiro. Forçando correção...")
+        # Tenta uma tradução rápida via IA ou apenas rejeita para retry
+        update_markdown_file(filepath, {"status": "script_failed", "error": "Roteiro gerado em Inglês"})
+        return False
+
     # Auditoria
     aprovado, auditoria = await verificar_veracidade_roteiro(roteiro_limpo, fatos_json)
     

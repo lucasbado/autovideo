@@ -160,7 +160,7 @@ def pesquisar_serper(query):
         print(f"   ⚠️ Erro na busca Serper: {e}")
         return []
 
-async def pesquisar_dados_brutos(tema, keywords=None):
+async def pesquisar_dados_brutos(tema, keywords=None, nicho=None):
     """Realiza busca na web usando múltiplas estratégias para maximizar chance de dados reais."""
     print(f"🔍 Pesquisando dados reais sobre: {tema}...")
     req_headers = {"User-Agent": "Mozilla/5.0"}
@@ -170,44 +170,58 @@ async def pesquisar_dados_brutos(tema, keywords=None):
     # 0) Vault Local (RAG) - PRIORIDADE ZERO
     resultados_brutos = []
     print(f"   📂 Consultando conhecimento local no Vault...")
-    conhecimento_local = buscar_conhecimento_local(tema_clean, top_k=5)
+    # Filtro de relevância: Ignora notas que não tenham score baixo (distância L2 no FAISS)
+    conhecimento_local = await buscar_conhecimento_local(tema_clean, top_k=3)
     for res in conhecimento_local:
-        resultados_brutos.append({
-            "title": f"Nota do Vault: {res['source']}",
-            "content": res['text'],
-            "url": f"obsidian://vault/{res['source']}",
-            "source": "vault",
-            "trusted": True
-        })
+        if res.get("score", 99) < 0.5: # Score RIGOROSO para evitar loop de assunto
+            resultados_brutos.append({
+                "title": f"Nota do Vault: {res['source']}",
+                "content": res['text'],
+                "url": f"obsidian://vault/{res['source']}",
+                "source": "vault",
+                "trusted": True
+            })
 
     # === IDENTIFICAÇÃO INTELIGENTE DA ENTIDADE ===
     tema_en = tema_clean
     try:
+        nicho_context = f" within the niche of '{nicho}'" if nicho else ""
         # Prompt Robusto 3.3: Mantém a especificidade e evita generalização
         prompt_entidade = f"""
-        Extract the specific, searchable ENTITY in ENGLISH from the theme below.
+        Extract the specific, searchable ENTITY in ENGLISH from the theme below{nicho_context}.
         Theme: '{tema_clean}'
         
         RULES:
-        1. Be SPECIFIC. "Piri Reis map history" -> "Piri Reis map". NOT just "map".
-        2. Output ONLY the term. No explanations.
+        1. Be SPECIFIC. "Piri Reis map history" -> "Piri Reis map".
+        2. IF THE THEME IS ABOUT '{nicho}', DO NOT return physics or general science entities unless strictly related.
+        3. Output ONLY the term. No explanations.
         """
-        res_trans = await chat_safe(model=MODELO_LLM, messages=[{"role": "user", "content": prompt_entidade}])
+        res_trans = await chat_safe(
+            model=MODELO_LLM, 
+            messages=[{"role": "user", "content": prompt_entidade}],
+            options={"temperature": 0.1, "num_gpu": 99}
+        )
         if res_trans:
             tema_en = _sanitize_for_query(res_trans.get("message", {}).get("content", ""))
             print(f"   🎯 Entidade para busca: '{tema_en}'")
         
         # Prompt de Pesquisa Histórica/Técnica: Evita o erro de "futuro 2026"
         prompt_queries = f"""
-        Generate 3 short, effective search engine queries in ENGLISH about '{tema_en}'.
-        Focus on:
-        1. Basic facts and official timeline.
-        2. Technical details, secrets or mysteries.
-        3. Academic or confirmed discoveries (including any updates up to {CURRENT_DATE}).
+        Generate 3 short, effective search engine queries in ENGLISH about '{tema_en}'{nicho_context}.
+        Focus on RECENT data (2024-2026).
+        
+        RULES:
+        1. NO SCIENCE if niche is '{nicho}' and '{nicho}' is not science-related.
+        2. Focus on: Basic facts, technical secrets, and confirmed discoveries SINCE 2024.
+        3. Add keywords like "latest update", "2024 revelation", "2025 news" to the queries.
         
         Output ONLY the 3 queries, one per line. No conversational text. No quotes.
         """
-        res_queries = await chat_safe(model=MODELO_LLM, messages=[{"role": "user", "content": prompt_queries}])
+        res_queries = await chat_safe(
+            model=MODELO_LLM, 
+            messages=[{"role": "user", "content": prompt_queries}],
+            options={"temperature": 0.3, "num_gpu": 99}
+        )
         if res_queries:
             todas_queries = res_queries.get("message", {}).get("content", "").strip().splitlines()
             # Limpeza de números se houver
@@ -257,7 +271,7 @@ def _norm_words(s):
     s2 = re.sub(r"[^a-zA-Z0-9\s]", " ", s_clean.lower())
     return [t for t in s2.split() if t and t not in STOPWORDS]
 
-def confirmar_fato(fato_text, frags, tema, min_sources=2):
+async def confirmar_fato(fato_text, frags, tema, min_sources=2):
     if not fato_text or not frags: return False, []
     fato_limpo = re.sub(r"\[\d+\]", "", fato_text).strip()
     norm_fact = _norm_words(fato_limpo)
@@ -265,7 +279,7 @@ def confirmar_fato(fato_text, frags, tema, min_sources=2):
 
     # Check Vault
     try:
-        conhecimento_previo = buscar_conhecimento_local(fato_limpo, top_k=1)
+        conhecimento_previo = await buscar_conhecimento_local(fato_limpo, top_k=1)
         if conhecimento_previo and conhecimento_previo[0].get('score', 999) < 0.8:
             return True, [f"vault://{conhecimento_previo[0]['source']}"]
     except: pass
@@ -324,14 +338,19 @@ FRAGMENTS:
 """ + "\n".join(lista)
     
     try:
-        res = await chat_safe(model=MODELO_LLM, messages=[{"role": "user", "content": prompt}], format="json")
+        res = await chat_safe(
+            model=MODELO_LLM, 
+            messages=[{"role": "user", "content": prompt}], 
+            options={"temperature": 0.1, "num_gpu": 99},
+            format="json"
+        )
         if not res: return None
         dados_llm = extract_json_from_text(res.get("message", {}).get("content", ""))
         if not dados_llm: return None
 
         fatos_confirmados = []
         for f in dados_llm.get("fatos", []):
-            conf, src = confirmar_fato(f.get("fato"), fragments, tema)
+            conf, src = await confirmar_fato(f.get("fato"), fragments, tema)
             if conf:
                 f["confirmado_em"] = src
                 fatos_confirmados.append(f)
@@ -346,7 +365,11 @@ async def traduzir_fatos_json(fatos_json):
     textos = [f.get("fato", "") for f in fatos_json["fatos"]] + [f.get("detalhe", "") for f in fatos_json["fatos"]]
     prompt = f"Translate to Brazilian Portuguese, one per line:\n{json.dumps(textos)}"
     try:
-        res = await chat_safe(model="phi4-mini", messages=[{"role": "user", "content": prompt}])
+        res = await chat_safe(
+            model="phi4-mini", 
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.1, "num_gpu": 99}
+        )
         traducoes = [line.strip() for line in res.get("message", {}).get("content", "").splitlines() if line.strip()]
         num = len(fatos_json["fatos"])
         for i in range(num):

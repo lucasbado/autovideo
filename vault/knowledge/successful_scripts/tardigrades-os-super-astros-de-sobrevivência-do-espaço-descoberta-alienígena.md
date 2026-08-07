@@ -3,19 +3,19 @@ tags: ["exemplo_estilo", "roteiro_sucesso"]
 tema: "Tardigrades: Os Super-Astros de Sobrevivência do Espaço! Descoberta Alienígena?"
 nicho: "default"
 data_aprovacao: "2026-07-29"
-score_auditoria: 0.8
+score_auditoria: 1.0
 ---
 
 # Roteiro: Tardigrades: Os Super-Astros de Sobrevivência do Espaço! Descoberta Alienígena?
 
-[SCENE: Close-up of a tardigrade on Earth] July 2026. A ser minúscula, mas impressionantemente resistente, sobreviveu exposta ao vácuo e radiação ultravioleta do espaço exterior.
+Fonte: kids.nationalgeographic.com
 
-[SCENE: Animation showing the FOTON-M3 mission timeline] Em 2007, na missão bioplano FOTON-M3, tardígrados desidratados foram lançados no espaço baixa órbita. Após 10 dias nessa duração, demonstraram uma capacidade de sobrevivência inesperada.
+Tardígradas podem sobreviver à exposição ao espaço exterior. Em 2007, tardígrados em estado de desidratação foram levados ao espaço baixa órbita na missão FOTON-M3, carregando carga bioplana para astrobiologia.
 
-[SCENE: Scientists reviewing data from the TARSE experiment] O experimento subsequente 'Resistência dos Tardígrados às Efeitos do Espaço' (TARSE) revelou que mais de 68% das tardigradas protegidas da radiação solar conseguiram ser reanimadas rapidamente após retornarem à Terra.
+Por 10 dias, sobreviveram seja expostos a vácuo e radiação ultravioleta solar ou apenas submetidos a um duro vácuo do espaço. O experimento 'Resistência dos Tardígrados às Efeitos do Espaço' (TARSE) demonstrou essa capacidade.
 
-[SCENE: Visualization of UV radiation in space] Esta resistência foi testada ainda em outro estudo, onde os organismos mostraram capacidade para suportir níveis extremamente elevados de radiação ultravioleta. Concluímos que tardígradas podem sobreviver a condições severas do espaço.
+Mais de 68% das tardígradas em estado de desidratação expostas à radiação UV no espaço foram reanimadas dentro de 30 minutos após serem devolvidas para a Terra. A imersão em água permitiu sua rápida recuperação.
 
-[SCENE: Panel showing temperature extremes] Eles também resistem a altas temperaturas, demonstrando tolerância a calor extremo, e ao contrário, consegue aguentar temperaturas ultra baixas. A chave para sua sobrevivência no exterior é o estado de desidratação.
+A exposição ao microgravidade não afetou significativamente a sobrevivência dos tardígrados durante o voo da STS-134, conhecido como experimento 'Tardígradas no Espaço' (TARDIKISS). Concluiu-se que nem essa condição nem raios cósmicos tiveram impacto relevante.
 
-[SCENE: Shot of Earth from space] O que resta claro é que tardígrados possuem propriedades de resistência única. Eles podem ser considerados verdadeiros super-seres capazes de persistir em um ambiente cósmico hostil, moldando o futuro da astrobiologia.
+Tardígradas podem tolerar condições extremas. Suportam níveis altos de radiação ultravioleta solar, resistem a temperaturas frias e sobrevivem em vácuo, como evidenciado pela sua capacidade de sobrevivência no espaço exterior.

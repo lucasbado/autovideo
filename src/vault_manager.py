@@ -95,6 +95,7 @@ def create_markdown_file(tema_obj, status="idea"):
         "tema": title,
         "status": status,
         "nicho": tema_obj.get("nicho", "default"),
+        "perfil": tema_obj.get("perfil", ""),
         "data_criacao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "entidade": tema_obj.get("entity", ""),
         "keywords": tema_obj.get("keywords", []),

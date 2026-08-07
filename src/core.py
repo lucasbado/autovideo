@@ -6,10 +6,13 @@ import math
 import json
 import re
 import sys
+import gc
 import multiprocessing
 import edge_tts
-import whisper
+from faster_whisper import WhisperModel
 import torch
+import pysubs2
+import subprocess
 from duckduckgo_search import DDGS
 import datetime
 from tqdm import tqdm
@@ -20,6 +23,7 @@ from moviepy import (
     VideoFileClip,
     AudioFileClip,
     TextClip,
+    ColorClip,
     CompositeVideoClip,
     concatenate_videoclips,
     concatenate_audioclips,
@@ -73,7 +77,7 @@ Certifique-se de ser 100% fiel apenas aos fatos fornecidos abaixo.
 
     # BUSCA EXEMPLOS DE ESTILO (RAG)
     print(f"🧠 Consultando exemplos de estilo no Vault...")
-    exemplos_estilo = buscar_conhecimento_local(f"roteiro sucesso {nicho or ''}", top_k=2)
+    exemplos_estilo = await buscar_conhecimento_local(f"roteiro sucesso {nicho or ''}", top_k=2)
     style_instruction = ""
     if exemplos_estilo:
         style_instruction = "\n### ESTRUTURA DE ESTILO - EXEMPLOS DE SUCESSO (IGNORE OS FATOS DOS EXEMPLOS):\n"
@@ -144,7 +148,12 @@ REGRAS DE FORMATAÇÃO:
             res_texto = await chat_safe(
                 model=MODELO_LLM, 
                 messages=[{"role": "user", "content": prompt_texto}],
-                options={"temperature": 0.5, "num_predict": 4096} # Aumentado para evitar cortes
+                options={
+                    "temperature": 0.5, 
+                    "num_predict": 2048, 
+                    "num_ctx": 8192,
+                    "num_gpu": 99
+                } 
             )
             
             if not res_texto: return None, None
@@ -244,6 +253,20 @@ REGRAS DE FORMATAÇÃO:
             
             roteiro_final_texto = roteiro_limpo
 
+            # --- VALIDAÇÃO DE IDIOMA (Anti-Inglês/Anti-Lixo) ---
+            common_english = [" the ", " of ", " and ", " is ", " for ", " with ", " that ", " this "]
+            english_word_count = sum(1 for word in common_english if word in f" {roteiro_limpo.lower()} ")
+            
+            if english_word_count >= 3:
+                failure_reason = f"detectado idioma incorreto (Inglês detectado: {english_word_count} palavras comuns)"
+                print(f"⚠️ Tentativa {tentativa_roteiro} falhou: {failure_reason}")
+                if tentativa_roteiro < max_tentativas_roteiro:
+                    continue
+                else:
+                    print("❌ Falha crítica: Modelo persistiu em gerar conteúdo em inglês.")
+                    roteiro_final_texto = ""
+                    break
+
             # --- VALIDAÇÃO DE CONTEÚDO E TAMANHO ---
             word_count = len(roteiro_final_texto.split())
             max_words = 400  # O prompt pede 200-250, 400 é um limite generoso.
@@ -300,7 +323,11 @@ REGRAS DE FORMATAÇÃO:
         resposta = await chat_safe(
             model="phi4-mini", 
             messages=[{"role": "user", "content": prompt_json}],
-            options={"temperature": 0.1},
+            options={
+                "temperature": 0.1,
+                "num_gpu": 99,
+                "num_thread": 4
+            },
             format="json"
         )
         
@@ -419,14 +446,81 @@ async def descarregar_videos(urls, dest_dir=TEMP_DIR, max_concurrency=3, retries
 
 
 def gerar_legendas():
-    print("✍️ A transcrever áudio para gerar legendas com o Whisper (GPU)...")
+    print("✍️ A transcrever áudio com Faster-Whisper (GPU)...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    modelo = whisper.load_model(MODELO_WHISPER, device=device)
-    fp16_mode = True if device == "cuda" else False
-    resultado = modelo.transcribe(
-        ARQUIVO_AUDIO, word_timestamps=True, fp16=fp16_mode, language="pt"
+    # Otimizado para VRAM: int8 em CPU ou float16 em GPU
+    compute_type = "float16" if device == "cuda" else "int8"
+    
+    model = WhisperModel(MODELO_WHISPER, device=device, compute_type=compute_type)
+    
+    segments, info = model.transcribe(
+        ARQUIVO_AUDIO, 
+        beam_size=5, 
+        word_timestamps=True,
+        language="pt"
     )
-    return resultado["segments"]
+    
+    # Converte o gerador em lista para processamento
+    word_level_segments = []
+    for segment in segments:
+        for word in segment.words:
+            word_level_segments.append({
+                "start": word.start,
+                "end": word.end,
+                "text": word.word.strip().upper()
+            })
+    
+    # Limpeza de VRAM e memória para a renderização
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+            
+    return word_level_segments
+
+
+def criar_arquivo_ass(segmentos, output_path, estilo):
+    """
+    Gera um arquivo de legendas .ass altamente estilizado para queima via FFmpeg.
+    """
+    subs = pysubs2.SSAFile()
+    subs.info["PlayResX"] = 1080
+    subs.info["PlayResY"] = 1920
+    
+    # Configuração do Estilo
+    def hex_to_rgb(hex_color):
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) == 6:
+            return int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        return 255, 255, 255
+
+    r1, g1, b1 = hex_to_rgb(estilo.get("cor_legenda", "#FFFFFF"))
+    r2, g2, b2 = hex_to_rgb(estilo.get("stroke_color", "#000000"))
+    
+    # Cria o estilo customizado
+    style = pysubs2.SSAStyle()
+    style.fontname = "Arial Black" # Fonte padrão robusta
+    style.fontsize = estilo.get("font_size", 75)
+    style.primarycolor = pysubs2.Color(r=r1, g=g1, b=b1)
+    style.outlinecolor = pysubs2.Color(r=r2, g=g2, b=b2)
+    style.outline = 3
+    style.shadow = 1
+    style.alignment = 2 # Centralizado embaixo
+    style.marginv = int(1920 * (1 - estilo.get("posicao_y", 0.7))) # Margem vertical reversa
+    
+    subs.styles["Default"] = style
+
+    # Adiciona os eventos (legendas)
+    for s in segmentos:
+        event = pysubs2.SSAEvent(
+            start=pysubs2.make_time(s=s["start"]),
+            end=pysubs2.make_time(s=s["end"]),
+            text=s["text"]
+        )
+        subs.append(event)
+    
+    subs.save(output_path)
+    return output_path
 
 
 def montar_video(segmentos_legenda, arquivos_video, estilo=None):
@@ -434,11 +528,9 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
         from styles import ESTILOS
         estilo = ESTILOS["default"]
 
-    print(f"🎬 A montar o vídeo com Estilo: {estilo.get('cor_legenda')}...")
+    print(f"🎬 A montar o vídeo Turbo (Aceleração GPU)...")
     audio = AudioFileClip(ARQUIVO_AUDIO)
     duracao_final = audio.duration
-
-    print(f"🖼️ Gerando trocas de cena fluidas para {duracao_final:.2f}s...")
 
     clips_de_fundo = [VideoFileClip(f).without_audio().with_fps(30) for f in arquivos_video]
     cenas_finais = []
@@ -462,118 +554,99 @@ def montar_video(segmentos_legenda, arquivos_video, estilo=None):
             inicio_aleatorio = random.uniform(0, inicio_maximo)
             cena = video_escolhido.subclipped(inicio_aleatorio, inicio_aleatorio + duracao_cena)
 
-        # --- REDIMENSIONAMENTO INTELIGENTE 9:16 (Arquitetura 3.5) ---
-        # Calcula qual dimensão deve ser a âncora para preencher 1080x1920 sem deixar bordas
+        # REDIMENSIONAMENTO INTELIGENTE 9:16
         ratio_original = cena.w / cena.h
         ratio_alvo = 1080 / 1920
-
         if ratio_original > ratio_alvo:
-            # Vídeo é mais largo que o alvo (ex: horizontal): fixa altura e corta laterais
             cena = cena.resized(height=1920)
         else:
-            # Vídeo é mais estreito que o alvo: fixa largura e corta topo/base
             cena = cena.resized(width=1080)
 
-        # Centraliza e corta para o tamanho exato do TikTok/Reels
         cena = cena.cropped(x_center=int(cena.w / 2), y_center=int(cena.h / 2), width=1080, height=1920)
-
-        if i % 2 == 0:
-            cena = cena.resized(1.05)
-            cena = cena.cropped(x_center=int(cena.w / 2), y_center=int(cena.h / 2), width=1080, height=1920)
-
         cenas_finais.append(cena.with_start(tempo_atual))
         tempo_atual += duracao_cena
 
     video_base = CompositeVideoClip(cenas_finais, size=(1080, 1920)).with_audio(audio)
 
-    print("✍️ Gerando legendas customizadas...")
-    clipes_extras = []
+    # Filtro Visual (Tint) por Nicho
+    tint_layer = None
+    if estilo.get("visual_tint"):
+        print(f"🎨 Aplicando filtro visual do nicho: {estilo.get('handle')}")
+        tint_layer = (
+            ColorClip(size=(1080, 1920), color=estilo["visual_tint"])
+            .with_opacity(estilo.get("tint_opacity", 0.05))
+            .with_duration(duracao_final)
+        )
 
+    # Marca d'água (A única coisa que o MoviePy vai renderizar agora)
     handle_text = estilo.get("handle", "@Fatos").upper()
+    # Se o perfil estiver no metadado do arquivo (passado via estilo ou manual), usa ele
+    if estilo.get("perfil_padrao"):
+        handle_text = f"@{estilo['perfil_padrao']}".upper()
+
     watermark = (
         TextClip(
             text=handle_text,
             font=estilo["font"],
-            font_size=35, # Ligeiramente menor para caber melhor
+            font_size=35,
             color="white",
             method="caption",
-            size=(400, None), # Largura aumentada para não cortar nomes longos
+            size=(400, None),
             text_align="center",
         )
         .with_opacity(0.4)
-        # Posição com margem de segurança (20px da borda)
-        .with_position(("right", 20)) 
+        .with_position(("right", 20))
         .with_duration(duracao_final)
-        .with_start(0)
     )
 
-    clipes_extras.append(watermark)
+    layers = [video_base]
+    if tint_layer: layers.append(tint_layer)
+    layers.append(watermark)
 
-    for seg in segmentos_legenda:
-        palavras = seg.get("words", [])
-        if not palavras:
-            itens = [{"start": seg["start"], "end": seg["end"], "text": seg["text"].strip().upper()}]
-        else:
-            itens = []
-            max_p = 3
-            for j in range(0, len(palavras), max_p):
-                fatia = palavras[j : j + max_p]
-                txt = " ".join([p["word"].strip() for p in fatia]).upper()
-                itens.append({"start": fatia[0]["start"], "end": fatia[-1]["end"], "text": txt})
-
-        for item in itens:
-            texto_seguro = f" {item['text']} "
-            # LARGURA SEGURA (Arquitetura 3.5): 80% da tela para evitar cortes verticais
-            largura_segura = int(1080 * 0.80)
-
-            txt_clip = TextClip(
-                text=texto_seguro,
-                font=estilo["font"],
-                font_size=estilo["font_size"],
-                color=estilo["cor_legenda"],
-                stroke_color=estilo["stroke_color"],
-                stroke_width=2,
-                method="caption",
-                size=(largura_segura, None),
-                text_align="center",
-            )
-
-            pos_y = int(1920 * estilo.get("posicao_y", 0.8))
-            txt_clip = (
-                txt_clip.with_position(("center", pos_y), relative=False)
-                .with_start(item["start"])
-                .with_end(item["end"])
-            )
-            clipes_extras.append(txt_clip)
-
-    video_final = CompositeVideoClip([video_base] + clipes_extras)
+    video_com_watermark = CompositeVideoClip(layers)
+    
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_output = os.path.join("temp", f"raw_video_{timestamp}.mp4")
     nome_final = os.path.join("outputs", f"video_{timestamp}.mp4")
 
-    print(f"⏳ Renderizando Vídeo Viral ({duracao_final:.2f}s)...")
-    
-    # --- RENDERIZAÇÃO TURBO (Arquitetura 3.7) ---
-    # Detecta núcleos do processador para multi-threading
+    # 1. Renderiza o vídeo base sem legendas (Rápido com NVENC)
+    print(f"⏳ Fase 1: Renderizando vídeo base...")
     n_cores = multiprocessing.cpu_count()
-    
-    video_final.write_videofile(
-        nome_final, 
+    video_com_watermark.write_videofile(
+        temp_output, 
         fps=30, 
-        codec="h264_nvenc", # Aceleração por GPU NVIDIA
+        codec="h264_nvenc", 
         audio_codec="aac", 
-        threads=n_cores,    # Usa todos os núcleos da CPU para auxílio
-        logger="bar",
-        ffmpeg_params=[
-            "-preset", "fast",    # Preset de velocidade da NVIDIA
-            "-tune", "hq",        # Sintonia de alta qualidade
-            "-pix_fmt", "yuv420p" # Compatibilidade padrão
-        ]
+        threads=n_cores,
+        logger='bar'
     )
+
+    # 2. Gera arquivo ASS
+    ass_path = os.path.join("temp", "legendas.ass")
+    criar_arquivo_ass(segmentos_legenda, ass_path, estilo)
+
+    # 3. Queima legendas via FFmpeg (Instantâneo)
+    print(f"⚡ Fase 2: Queimando legendas via FFmpeg...")
+    # Escapa o caminho para o FFmpeg no Windows
+    ass_path_ffmpeg = ass_path.replace("\\", "/").replace(":", "\\:")
+    
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", temp_output,
+        "-vf", f"subtitles='{ass_path_ffmpeg}'",
+        "-c:v", "h264_nvenc",
+        "-preset", "p1", # Preset de ultra velocidade
+        "-c:a", "copy",  # Copia o áudio sem re-encodificar
+        nome_final
+    ]
+    
+    subprocess.run(cmd, check=True)
+    print(f"✅ Fase 2 concluída: Vídeo final gerado.")
 
     audio.close()
     for v in clips_de_fundo:
         v.close()
-    video_final.close()
+    video_com_watermark.close()
 
     return nome_final
 

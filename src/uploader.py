@@ -1,11 +1,59 @@
 import os
 import time
 import asyncio
+import os
+import stat
 from playwright.async_api import async_playwright
 
 # Configuração de diretórios para sessões (cookies)
 SESSION_DIR = os.path.join("data", "sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
+
+def list_connected_accounts():
+    """
+    Retorna uma lista de nomes de perfis que possuem sessões salvas.
+    """
+    if not os.path.exists(SESSION_DIR):
+        return []
+    return [d for d in os.listdir(SESSION_DIR) if os.path.isdir(os.path.join(SESSION_DIR, d))]
+
+def remover_conta(perfil_nome):
+    """
+    Remove fisicamente a pasta de sessão de uma conta com tratamento de erro agressivo.
+    """
+    import shutil
+    import os
+
+    def remove_readonly(func, path, excinfo):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    perfil_path = os.path.join(SESSION_DIR, perfil_nome)
+    if os.path.exists(perfil_path):
+        try:
+            shutil.rmtree(perfil_path, onerror=remove_readonly)
+            return True
+        except Exception as e:
+            print(f"⚠️ Erro ao remover {perfil_nome}: {e}")
+            return False
+    return False
+
+
+def verificar_sessao(perfil_nome):
+    """
+    Verifica se a sessão possui dados de login reais (Cookies).
+    """
+    perfil_path = os.path.join(SESSION_DIR, perfil_nome)
+    cookies_path = os.path.join(perfil_path, "Default", "Network", "Cookies")
+    
+    if os.path.exists(cookies_path):
+        size_kb = os.path.getsize(cookies_path) / 1024
+        # Um banco de cookies com login real costuma ter > 20KB
+        if size_kb > 15:
+            return "Conectado"
+        return "Sessão Vazia"
+    
+    return "Desconectado"
 
 async def gerenciar_login(perfil_nome):
     """

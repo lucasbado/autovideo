@@ -4,6 +4,7 @@ import re
 import numpy as np
 import faiss
 import ollama
+import asyncio
 from datetime import datetime
 
 # Configurações
@@ -42,18 +43,14 @@ def chunk_text(text, filename, chunk_size=500):
     # Adiciona metadados ao chunk para o LLM saber a origem
     return [{"text": f"Fonte: {filename}\nConteúdo: {c}", "source": filename} for c in chunks]
 
-def get_embedding(text):
+async def get_embedding(text):
     """
-    Gera o vetor de embedding usando Ollama.
+    Gera o vetor de embedding usando o cliente seguro.
     """
-    try:
-        res = ollama.embeddings(model=EMBED_MODEL, prompt=text)
-        return res["embedding"]
-    except Exception as e:
-        print(f"❌ Erro ao gerar embedding: {e}")
-        return None
+    from ollama_client import get_embedding_safe
+    return await get_embedding_safe(EMBED_MODEL, text)
 
-def sincronizar_vault():
+async def sincronizar_vault():
     """
     Lê todos os arquivos em vault/knowledge, gera embeddings e salva o índice.
     """
@@ -89,7 +86,7 @@ def sincronizar_vault():
     
     for i, chunk in enumerate(all_chunks):
         print(f"   Vetorizando chunk {i+1}/{len(all_chunks)}...", end="\r")
-        vector = get_embedding(chunk["text"])
+        vector = await get_embedding(chunk["text"])
         if vector:
             embeddings.append(vector)
             valid_chunks.append(chunk)
@@ -113,14 +110,14 @@ def sincronizar_vault():
     print(f"\n✅ Sincronização concluída! {len(valid_chunks)} vetores salvos em data/.")
     return True
 
-def buscar_conhecimento_local(query, top_k=3):
+async def buscar_conhecimento_local(query, top_k=3):
     """
     Busca os chunks mais relevantes no índice local.
     """
     if not os.path.exists(INDEX_PATH) or not os.path.exists(CHUNKS_PATH):
         return []
         
-    query_vector = get_embedding(query)
+    query_vector = await get_embedding(query)
     if not query_vector:
         return []
         
@@ -144,7 +141,10 @@ def buscar_conhecimento_local(query, top_k=3):
 
 if __name__ == "__main__":
     # Teste rápido
-    sincronizar_vault()
-    res = buscar_conhecimento_local("O que você sabe sobre?")
-    for r in res:
-        print(f"\n[{r['source']}] (Score: {r['score']:.2f}):\n{r['text'][:200]}...")
+    async def _test():
+        await sincronizar_vault()
+        res = await buscar_conhecimento_local("O que você sabe sobre?")
+        for r in res:
+            print(f"\n[{r['source']}] (Score: {r['score']:.2f}):\n{r['text'][:200]}...")
+            
+    asyncio.run(_test())

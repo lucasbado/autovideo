@@ -68,6 +68,32 @@ ENTIDADES_POR_NICHO = {
         "H.H. Holmes murder castle",
         "Axeman of New Orleans history",
         "Green River Killer case details",
+    ],
+    "Tecnologia e Futuro": [
+        "Neuralink human trial updates 2024",
+        "Boston Dynamics Atlas electric reveal",
+        "OpenAI Sora technical architecture",
+        "Quantum computing logic gates explanation",
+        "Apple Vision Pro internal sensors design",
+        "Nvidia Blackwell GPU architecture secrets",
+        "Starship rocket engine technical details",
+        "Grok AI vs ChatGPT 5 benchmarks",
+        "Solid state battery technology breakthrough",
+        "Microsoft Stargate supercomputer plans",
+    ],
+    "Desenhos e Anime": [
+        "Studio Ghibli painting techniques",
+        "Akira motorcycle slide animation technical",
+        "Spirited Away character design secrets",
+        "Evangelion production schedule chaos",
+        "Cowboy Bebop animation rotoscoping",
+        "Disney Multiplane camera invention",
+        "Dragon Ball Z cell shading history",
+        "Mappa studio animator working conditions",
+        "The Simpsons early animation errors",
+        "Spider-Verse frame rate animation style",
+        "Anime voice actor recording secrets",
+        "Gundam cockpit design mechanical engineering",
     ]
 }
 
@@ -84,4 +110,7 @@ TEMAS_ESTRUTURADOS = [
     "A mensagem escondida no disco de ouro da Voyager 1",
     "O que os cientistas encontraram no fundo do oceano de Encélado",
     "O mistério do sinal Wow! que nunca mais se repetiu",
+    "Como a pintura à mão do Studio Ghibli cria cenários tão vivos",
+    "A verdade sobre o 'slide de moto' em Akira que virou lenda",
+    "O projeto Stargate da Microsoft: O supercomputador de 100 bilhões",
 ]

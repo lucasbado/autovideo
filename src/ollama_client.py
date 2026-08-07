@@ -13,21 +13,46 @@ async def chat_safe(model, messages, options=None, format=None):
     """
     async with ollama_lock:
         try:
-            # Garante que as opções básicas existam
-            if options is None:
-                options = {"temperature": 0.2}
+            # Opções de performance padrão
+            default_options = {
+                "temperature": 0.2,
+                "num_thread": 6,   # Limita uso de CPU para não travar o sistema
+                "num_gpu": 99      # Tenta forçar o máximo de camadas para a GPU
+            }
             
-            # Se for solicitado formato JSON, garante que esteja nas opções
+            if options:
+                default_options.update(options)
+            
             res = await asyncio.to_thread(
                 ollama.chat,
                 model=model,
                 messages=messages,
-                options=options,
+                options=default_options,
                 format=format
             )
             return res
         except Exception as e:
             print(f"❌ Erro na chamada segura ao Ollama ({model}): {e}")
+            return None
+
+async def get_embedding_safe(model, prompt):
+    """
+    Gera embeddings usando a trava global para evitar colisões com o chat.
+    """
+    async with ollama_lock:
+        try:
+            res = await asyncio.to_thread(
+                ollama.embeddings,
+                model=model,
+                prompt=prompt,
+                options={
+                    "num_thread": 4,
+                    "num_gpu": 99
+                }
+            )
+            return res.get("embedding")
+        except Exception as e:
+            print(f"❌ Erro na chamada de embedding segura ({model}): {e}")
             return None
 
 def recursive_clean_strings(data):

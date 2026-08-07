@@ -9,214 +9,237 @@ from knowledge_base_rag import buscar_conhecimento_local
 
 from ollama_client import chat_safe, extract_json_from_text
 
-MODELO_LLM = "phi4-mini" # Modelo rápido para ideação
-HISTORICO_FILE = "temas_gerados.json"
+MODELO_LLM = "phi4-mini" 
+HISTORICO_FILE = "data/temas_historico.json"
+DISCOVERY_QUEUE = "data/discovery_queue.json"
+KEYWORD_BLACKLIST_FILE = "data/keyword_blacklist.json"
 
-NICHOS = [
-    "Astronomia e Exploração Espacial",
-    "Arqueologia e Civilizações Antigas",
-    "Ciência e Física Quântica",
-    "Biologia e Criaturas Reais",
-    "História e Mistérios do Passado",
-    "Tecnologia e Futuro",
-    "Geografia e Lugares Extremos",
-]
+# Unificação de Nichos (Agents + Styles)
+NICHOS_CONFIG = {
+    "Games": "game development secrets, unreleased prototypes, technical glitches, industry mysteries",
+    "Ciência e Espaço": "astronomy discoveries, physics breakthroughs, space mission secrets, cosmic phenomena",
+    "História e Mistérios": "archaeological finds, ancient civilizations, historical enigmas, lost documents",
+    "True Crime e Mistérios": "forensic science breakthroughs, cold cases, criminal psychology, investigation secrets",
+    "Tecnologia e Futuro": "AI innovations, hardware breakthroughs, software architecture, futuristic tech leaks",
+    "Desenhos e Anime": "animation techniques, studio production secrets, lost media, voice acting history"
+}
 
+NICHOS = list(NICHOS_CONFIG.keys())
 
-def carregar_historico():
-    if os.path.exists(HISTORICO_FILE):
-        with open(HISTORICO_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except:
-                return []
-    return []
+def carregar_json(filepath, default_val):
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            try: return json.load(f)
+            except: return default_val
+    return default_val
 
+def salvar_json(filepath, data):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
-def salvar_tema(tema):
-    hist = carregar_historico()
-    hist.append(tema)
-    with open(HISTORICO_FILE, "w") as f:
-        json.dump(hist, f, indent=4)
-
+def get_niche_seeds(nicho):
+    """
+    Retorna 3 entidades aleatórias da base manual para servir de 'âncora' para a pesquisa.
+    """
+    from knowledge_base import ENTIDADES_POR_NICHO
+    base = ENTIDADES_POR_NICHO.get(nicho, ["curiosidades", "segredos", "mistérios"])
+    return random.sample(base, min(len(base), 3))
 
 async def buscar_tendencias_reais(nicho):
     """
-    Realiza uma busca na web para encontrar o que está sendo falado agora sobre o nicho.
+    Realiza uma busca na web misturando sementes manuais com tendências atuais.
     """
     from researcher import pesquisar_dados_brutos
-    print(f"📡 Buscando tendências reais para: {nicho}...")
     
-    query = f"latest discoveries news curiosity in {nicho} 2025 2026"
-    resultados = await pesquisar_dados_brutos(query)
+    seeds = get_niche_seeds(nicho)
+    print(f"📡 Buscando tendências RECENTES (2024-2026) para {nicho}...")
+    
+    # Constrói uma query que força a internet a buscar coisas SIMILARES às nossas sementes
+    # Foco absoluto em notícias RECENTES de 2024, 2025 e 2026.
+    seeds_str = " or ".join(seeds)
+    query = (
+        f"breaking {nicho} technical secrets, leaked production data or major discoveries "
+        f"SIMILAR to {seeds_str} PUBLISHED IN 2024 OR 2025 OR 2026. "
+        f"Ignore legacy/old facts."
+    )
+    
+    resultados = await pesquisar_dados_brutos(query, nicho=nicho)
     
     if not resultados:
-        return "Nenhuma tendência recente encontrada."
+        return f"Sem novidades recentes. Foque em mistérios técnicos de {seeds_str}."
         
-    resumo_contexto = ""
-    for r in resultados[:5]:
-        resumo_contexto += f"- {r.get('title')}: {r.get('content')[:200]}...\n"
+    resumo_contexto = "NOTÍCIAS E DESCOBERTAS RECENTES (2024-2026):\n"
+    for r in resultados[:6]:
+        # Filtro de relevância temporal e de nicho
+        content = r.get('content', '').lower()
+        title = r.get('title', '').lower()
+        
+        # Bloqueio de loop de Neutrons/Física em outros nichos
+        if nicho != "Ciência e Espaço" and any(w in content + title for w in ["quantum", "neutron", "nuclear", "physics breakthrough"]):
+            continue
+            
+        resumo_contexto += f"- {r.get('title')}: {r.get('content')[:250]}...\n"
         
     return resumo_contexto
 
-
 async def gerar_tema_factual(nicho_especifico=None):
-    if nicho_especifico:
-        nicho = nicho_especifico
-    else:
-        nicho = random.choice(NICHOS)
+    # 1. Tenta Discovery Queue
+    entity_from_queue = None
+    if os.path.exists(DISCOVERY_QUEUE):
+        try:
+            queue = carregar_json(DISCOVERY_QUEUE, [])
+            if queue:
+                entity_from_queue = queue.pop(0)
+                salvar_json(DISCOVERY_QUEUE, queue)
+                print(f"📡 Usando Fila de Descoberta: {entity_from_queue}")
+        except: pass
 
-    print(f"💡 Nicho/Contexto escolhido: {nicho}")
+    nicho = nicho_especifico or random.choice(NICHOS)
+    seeds = get_niche_seeds(nicho)
     
-    # BUSCA DINÂMICA DE TENDÊNCIAS
+    if entity_from_queue:
+        return {
+            "title": f"O segredo por trás de {entity_from_queue}", 
+            "entity": entity_from_queue, 
+            "keywords": [entity_from_queue], 
+            "nicho": nicho
+        }
+
+    print(f"💡 Gerando tema HÍBRIDO para: {nicho}")
+    
+    # 2. Busca Contexto Real do Nicho ancorado nas Seeds
     contexto_tendencias = await buscar_tendencias_reais(nicho)
 
-    # Carrega histórico para evitar repetição
-    historico = carregar_historico()
-    exclusoes = ", ".join(historico[-10:]) if historico else "Nenhum"
+    # 3. Gestão de Histórico e Blacklist
+    historico = carregar_json(HISTORICO_FILE, [])
+    blacklist = carregar_json(KEYWORD_BLACKLIST_FILE, [])
+    
+    exclusoes = ", ".join(historico[-15:]) if historico else "Nenhum"
+    termos_proibidos = ", ".join(blacklist[-20:]) if blacklist else "Nenhum"
 
-    # O prompt focado em CURIOSIDADES e NOTÍCIAS
     prompt = f"""
-Você é um pesquisador de **CURIOSIDADES FASCINANTES** e **NOTÍCIAS RECENTES**.
+Você é um Documentarista Especialista no nicho: **{nicho}**.
 Estamos em {CURRENT_DATE}.
 
-Nicho: {nicho}.
+### REFERÊNCIAS DE ESTILO (TEMAS QUE AMAMOS):
+{", ".join(seeds)}
 
-CONTEXTO DE TENDÊNCIAS REAIS (Use isso para inspirar o tema):
+### CONTEXTO REAL DE HOJE (Internet):
 {contexto_tendencias}
 
-Sua missão: Criar UM título de vídeo focado em um fato curioso, um segredo de desenvolvimento, um erro de design ou uma descoberta interessante (clássica ou recente).
+### MISSÃO:
+Crie UM título de vídeo documentário IMPACTANTE em PORTUGUÊS DO BRASIL sobre um fato REAL, um segredo técnico ou um erro de design dentro do nicho {nicho}.
 
-REGRAS:
-1. FOCO EM TENDÊNCIAS: Tente usar o contexto de tendências acima para criar algo que as pessoas estão pesquisando AGORA.
-2. TÍTULO IMPACTANTE: O tema deve ser algo surpreendente ou interessante.
-3. VARIEDADE: Pode ser uma curiosidade famosa já conhecida por muitos, ou uma descoberta científica/tecnológica recente de 2024, 2025 ou 2026.
-4. NADA DE GENERALIDADES: Evite temas como "História de The Last of Us". Seja específico em um detalhe.
-5. NÃO REPETIR: Histórico: {exclusoes}
-6. RETORNO: Responda APENAS com um JSON puro: {{"title": "Título Curioso", "keywords": ["entidade", "curiosidade", "segredo", "news"]}}.
-"""
+### REGRAS DO SISTEMA HÍBRIDO:
+1. IDIOMA OBRIGATÓRIO: Responda o título e a entidade em PORTUGUÊS DO BRASIL.
+2. MISTURA: Use o "Contexto Real" para encontrar algo NOVO, mas use as "Referências de Estilo" para garantir que o tema seja profundo e técnico.
+2. ZERO CIÊNCIA EM OUTROS NICHOS: Se o nicho é {nicho}, você NÃO PODE falar de física ou astronomia.
+3. NÃO REPETIR: 
+   - Títulos já usados: {exclusoes}
+   - Palavras Proibidas: {termos_proibidos}
+4. ESPECIFICIDADE: Seja clínico. Ex: Em vez de "Design de Personagem", fale sobre "O erro na proporção dos quadros do Studio Ghibli".
 
-    try:
-        # CHAMADA SEGURA (Fila do Ollama)
-        res = await chat_safe(
-            model=MODELO_LLM, 
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.8}
-        )
-        
-        if not res: return None
-        
-        conteudo = res.get("message", {}).get("content", "").strip()
-        
-        # Extração inteligente
-        dado = extract_json_from_text(conteudo)
-        
-        if not dado:
-            # Fallback regex se o parse falhar
-            m = re.search(r"\{.*\}", conteudo, re.DOTALL)
-            if m:
-                json_str = m.group()
-                json_str = re.sub(r"//.*", "", json_str)
-                dado = json.loads(json_str)
-            else:
-                return None
-
-        title = dado.get("title", "").strip()
-        keywords = dado.get("keywords", [])
-
-        # Salva no histórico para não repetir
-        salvar_tema(title)
-
-        print(f"🎯 Tema Sugerido: {title} | keywords: {keywords}")
-        return {"title": title, "keywords": keywords}
-
-    except Exception:
-        from knowledge_base import TEMAS_ESTRUTURADOS
-        fallback = random.choice(TEMAS_ESTRUTURADOS)
-        return {"title": fallback, "keywords": fallback.split()[:3]}
-
-
-async def gerar_tema_com_base():
-    """
-    Gera um tema combinando a IA com nosso Banco de Dados de Entidades (knowledge_base.py).
-    Isso garante que o tema seja focado em algo que REALMENTE existe e é interessante.
-    """
-    from knowledge_base import ENTIDADES_POR_NICHO
-    
-    nicho_escolhido = random.choice(list(ENTIDADES_POR_NICHO.keys()))
-    entidade = random.choice(ENTIDADES_POR_NICHO[nicho_escolhido])
-
-    print(f"💡 Combinando IA com Entidade Real: {entidade} (Nicho: {nicho_escolhido})")
-
-    prompt = f"""
-Você é um estrategista de conteúdo viral.
-Estamos em {CURRENT_DATE}.
-
-Sua tarefa é criar um TÍTULO IMPACTANTE para um vídeo de 1 minuto sobre a entidade: "{entidade}".
-
-O vídeo deve focar em um SEGREDO, um ERRO, uma CURIOSIDADE FAMOSA ou uma NOTÍCIA/DESCOBERTA RECENTE sobre essa entidade.
-
-REGRAS:
-1. FOCO TOTAL NA ENTIDADE: "{entidade}".
-2. TÍTULO VIRAL: Use ganchos como "O segredo de...", "O erro que ninguém viu...", "A verdade sobre...".
-3. VERACIDADE: NÃO adicione informações que não sejam verdadeiras sobre a entidade.
-4. RETORNO: Responda APENAS um JSON: {{"title": "Título", "keywords": ["k1", "k2"]}}.
+RESPONDA APENAS O JSON:
+{{
+  "title": "Título Viral e Curioso",
+  "entity": "Entidade pesquisável principal",
+  "keywords": ["key1", "key2"]
+}}
 """
 
     try:
         res = await chat_safe(
             model=MODELO_LLM, 
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.7}
+            options={"temperature": 0.9} # Aumentado para mais criatividade
         )
         if not res: return None
         
         dado = extract_json_from_text(res.get("message", {}).get("content", ""))
-        if dado:
-            dado['entity'] = entidade 
-            return dado
-    except:
-        pass
-    
-    return {"title": f"O segredo por trás de {entidade}", "entity": entidade, "keywords": [entidade]}
+        if not dado: return None
 
+        # --- VALIDATION: IDIOMA DO TEMA ---
+        english_words = [" the ", " in ", " and ", " secrets ", " mystery ", " hidden "]
+        if any(w in f" {dado['title'].lower()} " for w in english_words):
+            print(f"⚠️ IA gerou título em Inglês. Re-solicitando...")
+            return await gerar_tema_factual(nicho_especifico=nicho)
 
-async def gerar_tema_relacionado():
+        # Atualiza histórico e blacklist
+        historico.append(dado["title"])
+        salvar_json(HISTORICO_FILE, historico[-50:])
+        
+        # Extrai palavras-chave para a blacklist (evita o loop de neutrons)
+        # Filtra palavras pequenas
+        novos_termos = [w.lower() for w in dado["entity"].split() if len(w) > 3]
+        blacklist.extend(novos_termos)
+        salvar_json(KEYWORD_BLACKLIST_FILE, blacklist[-100:])
+
+        dado["nicho"] = nicho
+        print(f"🎯 Novo Tema Gerado: {dado['title']} [{nicho}]")
+        return dado
+
+    except Exception as e:
+        print(f"⚠️ Erro na ideação: {e}")
+        return None
+
+async def expandir_nicho(tema, fatos_json):
     """
-    Usa o RAG para encontrar o que já pesquisamos e sugere um tema conectado.
+    Analisa os fatos de um tema e sugere 3 novas entidades relacionadas para pesquisa futura.
     """
-    print("🧠 Consultando memória para sugerir tema relacionado...")
+    if not fatos_json or not fatos_json.get("fatos"): return
     
-    # Busca um "resumo" do que o vault sabe
-    conhecimento = buscar_conhecimento_local("principais descobertas e fatos pesquisados", top_k=5)
-    
-    if not conhecimento:
-        return await gerar_tema_factual()
-
-    contexto_vault = "\n".join([c['text'][:200] for c in conhecimento])
+    print(f"🧠 Expandindo conhecimento para o nicho de: {tema}...")
+    fatos_texto = "\n".join([f"- {f['fato']}" for f in fatos_json["fatos"][:5]])
     
     prompt = f"""
-Você é um arquiteto de conteúdo. 
-Baseado no que já pesquisamos no nosso Vault, sugira um NOVO tema que se conecte semanticamente.
-
-CONTEXTO DO VAULT (O que já sabemos):
-{contexto_vault}
-
-MISSÃO: Sugerir um tema de vídeo que seja um "próximo passo" ou uma curiosidade ligada a esses fatos.
-REGRAS: 
-1. NÃO REPITA temas que já estão no contexto.
-2. Seja específico.
-3. Responda APENAS o JSON: {{"title": "Título", "entity": "Termo de busca", "keywords": []}}.
-"""
-
+    Based on the following facts about '{tema}', suggest 3 SPECIFIC and searchable ENTITIES or MYSTERIES for a new documentary.
+    
+    FACTS:
+    {fatos_texto}
+    
+    RULES:
+    1. Be highly specific.
+    2. Suggest only real, searchable terms in ENGLISH.
+    3. Response must be a JSON array of strings: ["Entity 1", "Entity 2", "Entity 3"].
+    """
+    
     try:
         res = await chat_safe(model=MODELO_LLM, messages=[{"role": "user", "content": prompt}])
-        if not res: return None
-        return extract_json_from_text(res["message"]["content"])
-    except:
-        pass
+        if not res: return
+        novas_entidades = extract_json_from_text(res["message"]["content"])
         
-    return await gerar_tema_factual()
+        if novas_entidades and isinstance(novas_entidades, list):
+            queue = carregar_json(DISCOVERY_QUEUE, [])
+            queue.extend([e for e in novas_entidades if e not in queue])
+            salvar_json(DISCOVERY_QUEUE, queue[-50:])
+            print(f"✨ Novas entidades descobertas: {', '.join(novas_entidades)}")
+    except: pass
+
+async def gerar_tema_com_base():
+    from knowledge_base import ENTIDADES_POR_NICHO
+    nicho = random.choice(NICHOS)
+    entidades = ENTIDADES_POR_NICHO.get(nicho, ["Misterio"])
+    entidade = random.choice(entidades)
+    
+    return {
+        "title": f"O segredo oculto por trás de {entidade}",
+        "entity": entidade,
+        "keywords": [entidade, "secret"],
+        "nicho": nicho
+    }
+
+async def gerar_tema_relacionado():
+    conhecimento = await buscar_conhecimento_local("principais descobertas e fatos pesquisados", top_k=5)
+    if not conhecimento: return await gerar_tema_factual()
+    
+    contexto_vault = "\n".join([c['text'][:200] for c in conhecimento])
+    prompt = f"Baseado no que já pesquisamos:\n{contexto_vault}\nSugira um NOVO tema específico em JSON: {{\"title\":\"\", \"entity\":\"\", \"nicho\":\"\"}}"
+    
+    try:
+        res = await chat_safe(model=MODELO_LLM, messages=[{"role": "user", "content": prompt}])
+        return extract_json_from_text(res["message"]["content"])
+    except: return await gerar_tema_factual()
 
 def gerar_tema_da_base_por_nicho(nicho_input):
     """
@@ -228,8 +251,8 @@ def gerar_tema_da_base_por_nicho(nicho_input):
     mapa = {
         "Game": "Games",
         "Video Game": "Games",
-        "Anime": "Games",
-        "Desenho": "Games",
+        "Anime": "Desenhos e Anime",
+        "Desenho": "Desenhos e Anime",
         "Ciência": "Ciência e Espaço",
         "Espaço": "Ciência e Espaço",
         "Astronomy": "Ciência e Espaço",
@@ -252,6 +275,11 @@ def gerar_tema_da_base_por_nicho(nicho_input):
     if chave_base and chave_base in ENTIDADES_POR_NICHO:
         entidade = random.choice(ENTIDADES_POR_NICHO[chave_base])
         print(f"💡 Entidade Real Selecionada ({chave_base}): {entidade}")
-        return {"title": f"O segredo oculto de {entidade}", "entity": entidade, "keywords": [entidade, "secret", "curiosity"]}
+        return {
+            "title": f"O segredo oculto de {entidade}", 
+            "entity": entidade, 
+            "keywords": [entidade, "secret", "curiosity"],
+            "nicho": chave_base
+        }
     
     return None

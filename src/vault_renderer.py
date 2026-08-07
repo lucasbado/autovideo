@@ -53,8 +53,9 @@ async def renderizar_video(filepath):
     arquivo_resultado = core.montar_video(segmentos, arquivos_video, estilo=estilo)
 
     # 6. Organização
-    handle = estilo.get("handle", "@Fatos").replace("@", "")
-    pasta_perfil = os.path.join("outputs", handle)
+    # Prioriza o perfil atribuído na agenda (salvo no MD), fallback para o handle do estilo
+    folder_name = metadata.get("perfil") or estilo.get("handle", "@Fatos").replace("@", "")
+    pasta_perfil = os.path.join("outputs", folder_name)
     os.makedirs(pasta_perfil, exist_ok=True)
     novo_nome = os.path.join(pasta_perfil, os.path.basename(arquivo_resultado))
     os.rename(arquivo_resultado, novo_nome)
@@ -63,6 +64,7 @@ async def renderizar_video(filepath):
     update_markdown_file(filepath, {
         "status": "rendered",
         "video_path": novo_nome,
+        "perfil": folder_name, # Garante que o perfil usado está salvo
         "data_render": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
     

@@ -53,6 +53,11 @@ ROTEIRO PARA AUDITORIA:
         res = await chat_safe(
             model=MODELO_AUDITOR,
             messages=[{"role": "user", "content": prompt}],
+            options={
+                "temperature": 0.1,
+                "num_gpu": 99,
+                "num_ctx": 4096
+            },
             format="json"
         )
         

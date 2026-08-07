@@ -1,56 +1,31 @@
+# --- CORE UI ---
+flet==0.86.4
+
+# --- AI & LLM ---
 ollama
+torch
+faster-whisper
+
+# --- RESEARCH & SCRAPING ---
 requests
 python-dotenv
 duckduckgo_search
 tavily-python
 trafilatura
 spacy
+
+# --- VIDEO & AUDIO ---
 moviepy
 edge-tts
+pysubs2
 pillow
 numpy
-proglog
-imageio-ffmpeg
-pydantic
-aiohttp
-yarl
-multidict
-aiosignal
-frozenlist
-propcache
-aiohappyeyeballs
-async-timeout
-attrs
-certifi
-charset-normalizer
-click
-colorama
-decorator
-filelock
-greenlet
-h11
-httpcore
-httpx
-idna
-ImageIO
-Jinja2
-llvmlite
-lxml
-MarkupSafe
-more-itertools
-mpmath
-networkx
-numba
+
+# --- RAG & MEMORY ---
+faiss-cpu
+
+# --- AUTOMATION & UTILS ---
 playwright
-primp
-pyee
-regex
-setuptools
-sympy
-tabulate
-tiktoken
-torch
+aiohttp
+aiofiles
 tqdm
-typing_extensions
-typing-inspection
-urllib3

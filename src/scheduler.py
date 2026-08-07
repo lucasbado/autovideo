@@ -25,71 +25,68 @@ def salvar_log(log):
 
 async def agendador_de_postagem():
     """
-    Monitora os horários e realiza o upload dos vídeos pendentes.
+    Monitora a agenda semanal e realiza o upload nos horários marcados.
     """
-    print("🕒 Agendador de Postagem iniciado...")
+    from agenda_manager import obter_proxima_semana, AGENDA_PATH
+    print("🕒 Agendador Turbo iniciado...")
     
     while True:
         agora = datetime.datetime.now()
         hora_atual = agora.strftime("%H:%M")
         data_atual = agora.strftime("%Y-%m-%d")
         
-        if hora_atual in HORARIOS_POSTAGEM:
-            print(f"⏰ Hora de postar! ({hora_atual})")
-            
-            log = carregar_log()
-            # Verifica se já postamos hoje neste horário
-            ja_postado = any(p for p in log if p['data'] == data_atual and p['hora'] == hora_atual)
-            
-            if not ja_postado:
-                # 1. Procurar vídeos em outputs que não foram postados
-                for perfil_dir in os.listdir("outputs"):
-                    perfil_path = os.path.join("outputs", perfil_dir)
-                    if not os.path.isdir(perfil_path):
-                        continue
-                    
-                    # Busca arquivos .mp4
-                    videos = [f for f in os.listdir(perfil_path) if f.endswith(".mp4")]
-                    
-                    for video in videos:
-                        # Verifica se este vídeo específico já foi postado
-                        foi_postado = any(p for p in log if p['video'] == video)
-                        if foi_postado:
-                            continue
-                            
-                        video_full_path = os.path.join(perfil_path, video)
-                        metadata_path = video_full_path.replace(".mp4", ".txt")
-                        
-                        # Extrair legenda do arquivo .txt
-                        legenda = "Confira essa curiosidade! #fatos #curiosidades"
-                        if os.path.exists(metadata_path):
-                            with open(metadata_path, "r", encoding="utf-8") as f:
-                                linhas = f.readlines()
-                                for linha in linhas:
-                                    if linha.startswith("HASHTAGS:"):
-                                        legenda = linha.replace("HASHTAGS:", "").strip()
-                        
-                        # 2. Realizar o upload
-                        sucesso = await fazer_upload_tiktok(video_full_path, legenda, perfil_dir)
-                        
-                        if sucesso:
-                            log.append({
-                                "data": data_atual,
-                                "hora": hora_atual,
-                                "perfil": perfil_dir,
-                                "video": video,
-                                "status": "sucesso"
-                            })
-                            salvar_log(log)
-                            print(f"✅ Vídeo '{video}' postado com sucesso no perfil '{perfil_dir}'")
-                            # Espera um pouco antes do próximo perfil para não parecer spam
-                            await asyncio.sleep(60) 
-                            break # Posta apenas um vídeo por perfil por horário
-                
-            else:
-                print(f"⏸️ Já postado às {hora_atual}. Aguardando próximo horário.")
+        # 1. Busca a agenda atual
+        id_semana, _ = obter_proxima_semana()
+        filepath = os.path.join(AGENDA_PATH, f"{id_semana}.json")
         
-        # Espera 1 minuto antes de checar novamente
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                agenda = json.load(f)
+            
+            for slot in agenda.get("slots", []):
+                # Critérios para postar:
+                # 1. Data e Hora batem
+                # 2. Status é 'rendered' (ou 'script_ready' se quisermos renderizar na hora, mas melhor 'rendered')
+                # 3. Tem perfil definido
+                # 4. Ainda não foi postado (usamos o log para garantir)
+                
+                if (slot["data"] == data_atual and 
+                    slot["horario"] == hora_atual and 
+                    slot["status"] == "rendered" and 
+                    slot["perfil"]):
+                    
+                    log = carregar_log()
+                    ja_postado = any(p for p in log if p['video'] == slot['arquivo_vault'] and p['data'] == data_atual)
+                    
+                    if not ja_postado:
+                        print(f"⏰ Hora de postar: {slot['tema']} no perfil {slot['perfil']}")
+                        
+                        # Extrai legenda
+                        legenda = f"Confira essa curiosidade sobre {slot['tema']}! #fatos #curiosidades"
+                        video_path = None
+                        
+                        # No sistema novo, podemos buscar o markdown para pegar a legenda real
+                        if os.path.exists(slot["arquivo_vault"]):
+                            from vault_manager import read_markdown_file
+                            meta, _ = read_markdown_file(slot["arquivo_vault"])
+                            video_path = meta.get("video_path")
+                        
+                        if video_path and os.path.exists(video_path):
+                            sucesso = await fazer_upload_tiktok(video_path, legenda, slot["perfil"])
+                            if sucesso:
+                                log.append({
+                                    "data": data_atual,
+                                    "hora": hora_atual,
+                                    "perfil": slot["perfil"],
+                                    "video": slot["arquivo_vault"],
+                                    "status": "sucesso"
+                                })
+                                salvar_log(log)
+                                print(f"✅ Postagem concluída!")
+                        else:
+                            print(f"⚠️ Vídeo não encontrado para {slot['tema']}: {video_path}")
+
+        # Espera 1 minuto
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
